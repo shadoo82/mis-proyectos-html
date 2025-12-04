@@ -763,7 +763,7 @@
     }
     .selected-column {
       cursor: pointer;
-      padding: 10px !important;
+      padding: 2px 3px !important;   /* ← ESTO ES LO QUE REDUCE LA FILA */
       user-select: none;
     }
 
@@ -771,7 +771,18 @@
       pointer-events: none;
     }
 
+    /* === FILAS DELGADAS FORZADAS === */
+    #asks-body tr, 
+    #bids-body tr {
+        height: 16px !important;      /* Altura fija */
+    }
 
+    #asks-body td, 
+    #bids-body td {
+        padding: 1px 3px !important;  /* Poco padding */
+        line-height: 1 !important;    /* Compacto */
+        font-size: 11px !important;   /* Texto pequeño */
+    }
 
     
   </style>
@@ -1498,9 +1509,7 @@
           pendingUpdate = false;
         }, 150);
       }
-    }
-
-   
+    }   
     
     // Actualizar contadores de órdenes procesadas
     function updateProcessedCounters() {
@@ -2321,13 +2330,70 @@
         showError(`Error al cargar pares: ${err.message}`);
       }
     }
-    
-    // Formateadores
+        
+      // Formateadores
+        // ===============================================
+    //   🔥 ZDL FORMAT PRO  — PRICE / QTY / USDT
+    // ===============================================
+
+    // 📌 PRICE con precisión automática
     function formatPrice(price) {
-      const decimals = getDecimals(symbol);
-      return price.toFixed(decimals).replace(/(\.\d+?)0+$/, "$1");
+        if (price === null || price === undefined) return "-";
+
+        const p = Number(price);
+
+        // Precios extremadamente bajos (SHIBA, PEPE, etc.)
+        if (p < 0.0001) return p.toFixed(8);
+
+        // Precios bajos
+        if (p < 1) return p.toFixed(6);
+
+        // Precios medios
+        if (p < 100) return p.toFixed(4);
+
+        // Precios grandes
+        return p.toFixed(2);
     }
-    
+
+    // 📌 QTY reducido (K, M, B)
+    function formatQuantity(qty) {
+        if (!qty) return "0";
+
+        let n = Number(qty);
+
+        // --- 1) Si es muy pequeño (< 1), mantener precisión real ---
+        if (n < 1) {
+            // Máximo 6 decimales reales, sin cortar información útil
+            return n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+        }
+
+        // --- 2) Magnitudes grandes ---
+        if (n >= 1_000_000_000)
+            return (n / 1_000_000_000).toFixed(2) + "B";
+
+        if (n >= 1_000_000)
+            return (n / 1_000_000).toFixed(2) + "M";
+
+        if (n >= 1_000)
+            return (n / 1_000).toFixed(2) + "K";
+
+        // --- 3) Normal ---
+        return n.toFixed(3).replace(/\.?0+$/, "");
+    }
+
+    // 📌 USDT reducido (K, M, B)
+    function formatUsdt(value) {
+        if (!value) return "$0";
+
+        const n = Number(value);
+
+        if (n >= 1_000_000_000) return "$" + (n / 1_000_000_000).toFixed(2) + "B";
+        if (n >= 1_000_000)     return "$" + (n / 1_000_000).toFixed(2) + "M";
+        if (n >= 1_000)         return "$" + (n / 1_000).toFixed(2) + "K";
+
+        return "$" + n.toFixed(2);
+    }
+        
     function getDecimals(symbol) {
       const decimalsMap = {
         "BTCUSDT": 2,
@@ -2381,20 +2447,7 @@
       
       return decimalsMap[symbol] || 4;
     }
-    
-    function formatQuantity(quantity) {
-      if (quantity >= 1000000) return (quantity / 1000000).toFixed(2) + "M";
-      if (quantity >= 1000) return (quantity / 1000).toFixed(2) + "K";
-      return quantity.toFixed(4);
-    }
-    
-    function formatUsdt(value) {
-      if (value >= 1000000000) return (value / 1000000000).toFixed(2) + "B";
-      if (value >= 1000000) return (value / 1000000).toFixed(2) + "M";
-      if (value >= 1000) return (value / 1000).toFixed(2) + "K";
-      return value.toFixed(2);
-    }
-    
+
     function formatAge(milliseconds) {
       if (milliseconds < 0) return "0s";
       
