@@ -233,16 +233,20 @@
       border-radius: 5px;
       overflow: hidden;
     }
-    
+
     th, td {
-      padding: 5px 6px;
+      padding: 2px 4px !important;   /* Fila más delgada */
       border: 1px solid var(--border-color);
       position: relative;
       cursor: pointer;
-      line-height: 1.2;
+      line-height: 1 !important;
       text-align: center;
     }
-    
+
+    tr {
+      height: auto !important;
+    }
+
     th {
       background-color: #333;
       color: var(--bid-color);
@@ -251,33 +255,33 @@
       top: 0;
       font-size: 11px;
     }
-    
+
     td {
       color: var(--text-secondary);
       user-select: none;
       font-size: 11px;
     }
-    
+
     td span {
       display: inline-block;
       width: 100%;
       text-align: center;
       user-select: text;
     }
-    
+
     td::selection, td span::selection {
       background: rgba(0, 255, 0, 0.3);
     }
-    
+
     .ask-row { color: var(--text-secondary); }
     .bid-row { color: var(--text-secondary); }
-    
+
     tr:hover { background-color: #3a3a3a; }
-    
+
     .bold-row td {
       font-weight: bold;
     }
-    
+
     .color-transparent {
       background-color: transparent;
       transition: background-color 0.2s ease-out, color 0.2s ease-out;
@@ -997,9 +1001,8 @@
 
     function freezeRow(price) {
         frozenRowPrice = price;
-        frozenUntil = Date.now() + 150; // 150ms de protección
+        frozenUntil = Date.now() + 350; // 350ms — suficiente para que el click entre SIEMPRE
     }
-
     
     // Configuración de alertas
     const ALERT_SETTINGS = {
@@ -1426,6 +1429,20 @@
             } else {
                 row.classList.remove("selected-row");
             }
+
+            // === BLOQUE DEFINITIVO DE PROTECCIÓN ===
+            // Si esta fila está congelada, NO la reemplazamos ni actualizamos.
+            if (item.price === frozenRowPrice && Date.now() < frozenUntil) {
+
+                const existingRow = existingRows.get(item.price);
+
+                if (existingRow) {
+                    fragment.appendChild(existingRow);  // conservar fila 100% intacta
+                    existingRows.delete(item.price);
+                    return; // ← saltar TODA la actualización de esta fila
+                }
+            }
+            // === FIN DE PROTECCIÓN ===           
 
             row.innerHTML = `
               <td><span>${index + 1}</span></td>
@@ -2221,6 +2238,31 @@
           bidsPriceMap.delete(price);
         }
       }
+    }
+
+    function handleSelectClick(event, price, isAsk) {
+        event.stopPropagation();
+
+        // Congelamos la fila PARA QUE EL CLICK SIEMPRE ENTRE
+        freezeRow(price);
+
+        const td = event.currentTarget;
+        const checkbox = td.querySelector(".selection-checkbox");
+        if (!checkbox) return;
+
+        // Desactivamos actualizaciones durante el click
+        checkbox.style.pointerEvents = "auto";
+
+        // Invertir estado
+        checkbox.checked = !checkbox.checked;
+
+        // Procesar la selección
+        togglePriceSelection(price, isAsk, checkbox);
+
+        // Rehabilitar pointer-events después del freeze
+        setTimeout(() => {
+            checkbox.style.pointerEvents = "none";
+        }, 350);
     }
     
     function saveSelectedPrices() {
