@@ -757,33 +757,19 @@
     @keyframes fadeOut {
       to { opacity: 0; transform: translateY(10px); }
     }
-
-       /* CELDA DE SELECCIÓN */
     .selected-column {
-        cursor: pointer;
-        user-select: none;
+      cursor: pointer;
+      padding: 10px !important;
+      user-select: none;
     }
 
-    /* checkbox NO recibe clic — el TD sí */
     .selected-column input.selection-checkbox {
-        pointer-events: none !important;
-    }
-
-    /* Congelar la fila cuando el mouse está encima */
-    tr.freeze-row * {
-        transition: none !important;
-    }
-
-        /* 🔥 FIX CLICK SEL — evita que la celda sea destruida mientras haces clic */
-    .selected-column.freeze {
-        pointer-events: auto !important;
-        background-color: rgba(255,255,0,0.07);
-        transition: background-color 0.05s linear;
+      pointer-events: none;
     }
 
 
 
-  
+    
   </style>
   <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -1004,59 +990,17 @@
     let clustersVisible = false;
     let currentMarkers = [];
     let currentPriceLines = [];
-    let previousAsks = new Map();
-    let previousBids = new Map();
-    let institutionalMarkers = [];
-    let institutionalLines = new Map();    // price → lineId
-    let institutionalPanel = [];           // panel lateral   
-    let institutionalMemory = new Map();  // ← FALTABA ESTA
-    let lastSpreadAlertTime = 0;
-    let spreadAlertElement = null;
 
-     
+        // === FREEZE SOLO LA FILA SELECCIONADA ===
+    let frozenRowPrice = null;
+    let frozenUntil = 0;
 
-    // ===== SPOOF DETECTOR =====
-    let spoofMemory = new Map();
-
-    const SPOOF_MIN_USDT = 5000000; // 50M USDT mínimo para spoof
-    const SPOOF_MAX_MS = 1500;       // duración máxima para considerarlo spoof
-
-    function detectSpoof(isAsk, now) {
-
-      const current = isAsk ? futuresAsksData : futuresBidsData;
-      const previous = isAsk ? previousAsks : previousBids;
-      const side = isAsk ? "ASK" : "BID";
-
-      // Convertimos precios actuales en un Set
-      const currentPrices = new Set(current.map(o => o.price));
-
-      // 1. Detectar desaparición de órdenes grandes
-      previous.forEach((order, price) => {
-
-        // Si una orden grande desapareció
-        if (!currentPrices.has(price)) {
-          const elapsed = now - order.time;
-
-          if (order.usdt >= SPOOF_MIN_USDT && elapsed <= SPOOF_MAX_MS) {
-            console.log(
-              `%c🔥 SPOOF DETECTADO | ${side} | Precio: ${price} | ` +
-              `Valor: ${order.usdt.toFixed(0)} USD | Duración: ${elapsed}ms`,
-              "background:red;color:white;font-weight:bold;padding:5px"
-            );
-          }
-        }
-      });
-
-      // 2. Guardar snapshot actual
-      const map = new Map();
-      current.forEach(o => {
-        map.set(o.price, { time: now, usdt: o.usdt });
-      });
-
-      if (isAsk) previousAsks = map;
-      else previousBids = map;
+    function freezeRow(price) {
+        frozenRowPrice = price;
+        frozenUntil = Date.now() + 150; // 150ms de protección
     }
 
+    
     // Configuración de alertas
     const ALERT_SETTINGS = {
       spreadAlert: 0.5, // % para considerar spread alto
@@ -1156,248 +1100,144 @@
     // WebSocket para depth (libro de órdenes)
     function initializeDepthSocket() {
       const socket = new WebSocket(futuresWsUrl);
-
+      
       socket.onopen = () => {
         updateWsStatus(`WebSocket: Conectado (Depth)`);
       };
-
+      
       socket.onerror = (error) => {
         showError(`Error en Depth WebSocket: ${error.message || 'Desconocido'}`);
       };
-
+      
       socket.onclose = () => {
         updateWsStatus("WebSocket: Reconectando (Depth)...");
         setTimeout(initializeDepthSocket, 3000);
       };
-
+      
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           const now = Date.now();
-
-          // -----------------------------
-          //           ASKS
-          // -----------------------------
+          
           if (data.a && Array.isArray(data.a)) {
-
             futuresAsksData = updateOrders(futuresAsksData, data.a, now, true);
-
-            detectSpoof(true, now);
-
             asksProcessed += data.a.length;
-
+            
+            // Verificar órdenes institucionales en asks
             data.a.forEach(([p, q]) => {
               const price = parseFloat(p);
               const quantity = parseFloat(q);
               const usdtValue = price * quantity;
-
+              
               if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
                 showOrderAlert('ask', usdtValue, true);
-                addChartInstitutionalAlert(price, "ask", usdtValue);   // ✔ AGREGADO
-              } 
-              else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
+              } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
                 showOrderAlert('ask', usdtValue, false);
-                addChartInstitutionalAlert(price, "ask", usdtValue);   // ✔ AGREGADO
               }
             });
           }
-
-          // -----------------------------
-          //           BIDS
-          // -----------------------------
+          
           if (data.b && Array.isArray(data.b)) {
-
             futuresBidsData = updateOrders(futuresBidsData, data.b, now, false);
-
-            detectSpoof(false, now);
-
             bidsProcessed += data.b.length;
-
+            
+            // Verificar órdenes institucionales en bids
             data.b.forEach(([p, q]) => {
               const price = parseFloat(p);
               const quantity = parseFloat(q);
               const usdtValue = price * quantity;
-
+              
               if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
                 showOrderAlert('bid', usdtValue, true);
-                addChartInstitutionalAlert(price, "bid", usdtValue);   // ✔ AGREGADO
-              } 
-              else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
+              } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
                 showOrderAlert('bid', usdtValue, false);
-                addChartInstitutionalAlert(price, "bid", usdtValue);   // ✔ AGREGADO
               }
             });
           }
-
+          
           updateProcessedCounters();
           updateLiquidityStats();
           updateOrderBookImbalance();
           trackLiquidityChanges();
-          updateTables();
-
         } catch (err) {
           showError(`Error al procesar mensaje de Depth: ${err.message}`);
         }
       };
     }
-
-    function detectSpoof(isAsk, now) {
-
-      const orders = isAsk ? futuresAsksData : futuresBidsData;
-
-      orders.forEach(order => {
-
-        const price = order.price;
-        const qty   = order.qty;
-        const usdt  = order.usdt;
-
-        const key = `${isAsk ? "ASK" : "BID"}_${price}`;
-
-        // ---- ORDEN GRANDE APARECE ----
-        if (qty > 0 && usdt >= SPOOF_MIN_USDT) {
-
-          if (!spoofMemory.has(key)) {
-
-            spoofMemory.set(key, {
-              time: now,
-              usdt: usdt,
-              side: isAsk ? "ASK" : "BID"
-            });
-
-            console.log(
-              `%c🟨 ORDEN GRANDE (${isAsk ? "ASK" : "BID"}) APARECE | ${price} | ${usdt.toFixed(0)} USD`,
-              "color: orange; font-weight: bold"
-            );
-          }
-
-          return;
-        }
-
-        // ---- ORDEN DESAPARECE (SPOOF) ----
-        if (qty === 0 && spoofMemory.has(key)) {
-
-          const info = spoofMemory.get(key);
-          const duration = now - info.time;
-
-          if (duration <= SPOOF_MAX_MS) {
-            console.log(
-              `%c🔥 SPOOF DETECTADO (${info.side}) | Precio: ${price} | Valor: ${info.usdt.toFixed(0)} USD | Duración: ${duration} ms`,
-              "background:red; color:white; font-weight:bold; padding:3px;"
-            );
-          }
-
-          spoofMemory.delete(key);
-        }
-
-      });
-
-    }
-
+    
     // WebSocket para velas en tiempo real
     function initializeKlineSocket() {
-
-        // === VALIDAR INTERVALO PARA EVITAR WEBSOCKET INVALIDO ===
-        const validIntervals = [
-            "1m","3m","5m","15m","30m",
-            "1h","2h","4h",
-            "1d","1w","1M"
-        ];
-
-        if (!validIntervals.includes(currentInterval)) {
-            console.warn("⛔ Intervalo inválido detectado:", currentInterval, "→ se cambia a 1h");
-            currentInterval = "1h";
-            localStorage.setItem("chartInterval", "1h");
+      if (klineSocket) {
+        klineSocket.close();
+      }
+      
+      klineSocket = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`);
+      
+      klineSocket.onopen = () => {
+        updateWsStatus(`WebSocket: Conectado (Kline)`);
+        reconnectAttempts = 0; // Resetear contador de reconexión
+        loadHistoricalKlines();
+      };
+      
+      klineSocket.onerror = (error) => {
+        showError(`Error en Kline WebSocket: ${error.message || 'Desconocido'}`);
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+          setTimeout(initializeKlineSocket, delay);
+          reconnectAttempts++;
+        } else {
+          showError("Maximo de reconexiones alcanzado. Recargue la página.");
         }
-
-        // ==== CERRAR SOCKET ANTERIOR ====
-        if (klineSocket) {
-            try { klineSocket.close(); } catch(e){}
+      };
+      
+      klineSocket.onclose = () => {
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+          updateWsStatus("WebSocket: Reconectando (Kline)...");
+          setTimeout(initializeKlineSocket, 3000);
+          reconnectAttempts++;
         }
-
-        // ==== CREAR URL FINAL ====
-        const wsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`;
-        console.log("🔌 Conectando Kline WS:", wsUrl);
-
-        klineSocket = new WebSocket(wsUrl);
-
-        // ==== AL CONECTAR ====
-        klineSocket.onopen = () => {
-            updateWsStatus(`WebSocket: Conectado (Kline)`);
-            reconnectAttempts = 0;
-            loadHistoricalKlines();
-        };
-
-        // ==== ERROR ====
-        klineSocket.onerror = (error) => {
-            console.warn("❌ Error WebSocket Kline:", error);
-
-            showError(`Error en Kline WebSocket: ${error.message || 'Error desconocido'}`);
-
-            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-                reconnectAttempts++;
-                setTimeout(initializeKlineSocket, delay);
+      };
+      
+      klineSocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          const kline = data.k;
+          
+          const newCandle = {
+            time: Math.floor(kline.t / 1000),
+            open: parseFloat(kline.o),
+            high: parseFloat(kline.h),
+            low: parseFloat(kline.l),
+            close: parseFloat(kline.c)
+          };
+          
+          if (kline.x) { // Vela cerrada
+            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+              candlesData[candlesData.length - 1] = newCandle;
             } else {
-                showError("Maximo de reconexiones alcanzado. Recargue la página.");
+              candlesData.push(newCandle);
+              if (candlesData.length > 150) candlesData.shift();
             }
-        };
-
-        // ==== CIERRE ====
-        klineSocket.onclose = () => {
-            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                updateWsStatus("WebSocket: Reconectando (Kline)...");
-                reconnectAttempts++;
-                setTimeout(initializeKlineSocket, 3000);
+            lastCandle = newCandle;
+          } else { // Vela en progreso
+            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+              candlesData[candlesData.length - 1] = newCandle;
+            } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
+              candlesData.push(newCandle);
+              if (candlesData.length > 150) candlesData.shift();
             }
-        };
-
-        // ==== MENSAJES ====
-        klineSocket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                const kline = data.k;
-
-                const newCandle = {
-                    time: Math.floor(kline.t / 1000),
-                    open: parseFloat(kline.o),
-                    high: parseFloat(kline.h),
-                    low: parseFloat(kline.l),
-                    close: parseFloat(kline.c)
-                };
-
-                if (kline.x) {
-                    // Cerrada
-                    if (candlesData[candlesData.length - 1]?.time === newCandle.time) {
-                        candlesData[candlesData.length - 1] = newCandle;
-                    } else {
-                        candlesData.push(newCandle);
-                        if (candlesData.length > 150) candlesData.shift();
-                    }
-                } else {
-                    // En progreso
-                    if (candlesData[candlesData.length - 1]?.time === newCandle.time) {
-                        candlesData[candlesData.length - 1] = newCandle;
-                    } else {
-                        candlesData.push(newCandle);
-                        if (candlesData.length > 150) candlesData.shift();
-                    }
-                }
-
-                // Actualizar el gráfico
-                if (candlestickSeries) {
-                    candlestickSeries.setData(candlesData);
-
-                    const ema100 = calculateEMA(candlesData, 100);
-                    if (emaSeries) emaSeries.setData(ema100);
-                }
-
-            } catch (err) {
-                console.error(err);
-                showError(`Error al procesar mensaje de Kline: ${err.message}`);
-            }
-        };
+          }
+          
+          if (candlestickSeries) {
+            candlestickSeries.setData(candlesData);
+            const ema100 = calculateEMA(candlesData, 100);
+            if (emaSeries) emaSeries.setData(ema100);
+          }
+        } catch (err) {
+          showError(`Error al procesar mensaje de Kline: ${err.message}`);
+        }
+      };
     }
-
     
     // Mostrar alerta visual para órdenes institucionales
     function showOrderAlert(type, value, isVeryLarge) {
@@ -1435,131 +1275,30 @@
           : futuresBidsData.find(b => b.usdt === value)?.price;
         
         if (price) {
-          addChartInstitutionalAlert(price, type, value);
+          addChartAlertMarker(price, type, value);
         }
       }
     }
     
-
-    // ==============================================
-    //     🚀 ZDL - ALERTAS INSTITUCIONALES PRO
-    //     Top 3 reales + Anti-duplicados
-    // ==============================================
-
-    let lastInstitutional = { price: null, value: null, time: 0 };
-
-
-    function addChartInstitutionalAlert(price, type, value) {
-        if (!candlestickSeries) return;
-
-        const key = `${type}_${price}`;
-
-        // ============================================
-        // 🚫 EVITAR ALERTAS DUPLICADAS EN EL MISMO PRECIO
-        // ============================================
-        const lastValue = institutionalMemory.get(key);
-
-        // Si la alerta ya existe y el valor es casi igual → ignorar
-        if (lastValue && Math.abs(lastValue - value) < 5_000_000) {
-            return;
-        }
-
-        // Guardamos el valor
-        institutionalMemory.set(key, value);
-
-
-        // ============================================
-        // 🎨 COLOR FINAL POR TIPO
-        // ============================================
-        // BID → verde
-        // ASK → rojo
-        let color = type === "ask" ? "#ff3333" : "#00ff55";
-
-
-        // ============================================
-        // 📐 TAMAÑO SEGÚN MONTOS
-        // ============================================
-        let size = 0.6;   // base
-
-        if (value >= 100_000_000) size = 0.9;
-        if (value >= 300_000_000) size = 1.2;
-
-
-        // ============================================
-        // 📍 POSICIÓN SEGÚN TIPO
-        // ============================================
-        const position = type === "ask" ? "aboveBar" : "belowBar";
-        const shape    = type === "ask" ? "arrowDown" : "arrowUp";
-
-
-        // ============================================
-        // 🔥 CREAR MARCADOR
-        // ============================================
-        const marker = {
-            time: Math.floor(Date.now() / 1000),
-            position,
-            color,
-            shape,
-            text: `${type.toUpperCase()} • ${formatUsdt(value)}`,
-            size
-        };
-
-        institutionalMarkers.push(marker);
-
-
-        // ============================================
-        // 🔝 SOLO LAS 3 MÁS IMPORTANTES
-        // ============================================
-        institutionalMarkers = institutionalMarkers
-            .sort((a, b) => {
-                const va = parseFloat(a.text.split("•")[1]);
-                const vb = parseFloat(b.text.split("•")[1]);
-                return vb - va;
-            })
-            .slice(0, 3);
-
-
-        // ============================================
-        // 🖼️ DIBUJAR EN EL GRÁFICO
-        // ============================================
-        candlestickSeries.setMarkers(institutionalMarkers);
-
-
-        // ============================================
-        // ⏳ LIMPIAR DESPUÉS DE 20 SEGUNDOS
-        // ============================================
-        setTimeout(() => {
-            institutionalMarkers = institutionalMarkers.filter(m => m.time !== marker.time);
-            candlestickSeries.setMarkers(institutionalMarkers);
-        }, 20_000);
-    }
-
-    function addInstitutionalLine(price, color) {
-        if (!chart) return;
-
-        // Si ya existe, no duplicar
-        if (institutionalLines.has(price)) return;
-
-        const line = chart.addPriceLine({
-            price,
-            color,
-            lineWidth: 2,
-            lineStyle: 2 // dashed
-        });
-
-        institutionalLines.set(price, line);
-
-        // Remover la línea automáticamente cuando el precio la toque
-        const watcher = setInterval(() => {
-            if (!markPriceFutures) return;
-
-            const diff = Math.abs(markPriceFutures - price);
-            if (diff <= (0.5)) {      // dentro de $0.5 → consumida
-                chart.removePriceLine(line);
-                institutionalLines.delete(price);
-                clearInterval(watcher);
-            }
-        }, 500);
+    // Añadir marcador de alerta al gráfico
+    function addChartAlertMarker(price, type, value) {
+      if (!candlestickSeries) return;
+      
+      const now = Math.floor(Date.now() / 1000);
+      const marker = {
+        time: now,
+        position: type === 'ask' ? 'belowBar' : 'aboveBar',
+        color: type === 'ask' ? '#ff0000' : '#00ff00',
+        shape: type === 'ask' ? 'arrowDown' : 'arrowUp',
+        text: `${type.toUpperCase()}: $${formatUsdt(value)}`,
+        size: 2
+      };
+      
+      candlestickSeries.setMarkers([marker]);
+      
+      setTimeout(() => {
+        candlestickSeries.setMarkers([]);
+      }, 30000);
     }
     
     // Actualizar órdenes con nuevos datos
@@ -1603,6 +1342,12 @@
     }
     
     // Actualizar tablas de bids y asks
+    function updateTables() {
+      updateTable("asks-body", futuresAsksData, true);
+      updateTable("bids-body", futuresBidsData, false);
+    }
+    
+    // Actualizar una tabla específica (versión simplificada)
     function updateTable(tableId, data, isAsk) {
         const tableBody = document.getElementById(tableId);
         if (!tableBody) return;
@@ -1610,9 +1355,8 @@
         const now = Date.now();
         const existingRows = new Map();
 
-        // Guardar filas existentes
         Array.from(tableBody.children).forEach(row => {
-            const priceCell = row.querySelector(".price-cell");
+            const priceCell = row.querySelector('.price-cell');
             if (priceCell) {
                 const price = parseFloat(priceCell.textContent);
                 existingRows.set(price, row);
@@ -1622,6 +1366,20 @@
         const fragment = document.createDocumentFragment();
 
         data.forEach((item, index) => {
+
+            // 🔥🔥🔥 FREEZE SOLO LA FILA SELECCIONADA 🔥🔥🔥
+            // Si esta fila está congelada → NO se actualiza.
+            if (item.price === frozenRowPrice && Date.now() < frozenUntil) {
+                const existingRow = existingRows.get(item.price);
+                if (existingRow) {
+                    fragment.appendChild(existingRow);
+                    existingRows.delete(item.price);
+                    return; // ← CONTINUAR AL SIGUIENTE ITEM
+                }
+            }
+            // FIN DEL BLOQUE FREEZE
+            // -------------------------------------------------------
+
             const age = formatAge(now - item.lastUpdated);
             const percentage = markPriceFutures ?
                 (((item.price - markPriceFutures) / markPriceFutures) * 100).toFixed(3) + "%" :
@@ -1629,97 +1387,79 @@
 
             let row = existingRows.get(item.price);
 
-            // Si no existe, crearla UNA SOLA VEZ
             if (!row) {
                 row = document.createElement("tr");
                 row.className = isAsk ? "ask-row" : "bid-row";
-
-                row.innerHTML = `
-                    <td><span></span></td>
-                    <td class="age-cell"><span></span></td>
-                    <td class="price-cell"><span></span></td>
-                    <td><span></span></td>
-                    <td><span></span></td>
-                    <td><span></span></td>
-                    <td><span></span></td>
-
-                    <td class="selected-column">
-                        <input type="checkbox" class="selection-checkbox">
-                    </td>
-                `;
-
-                // 🔥 AQUÍ ESTÁ EL FIX DEL CLICK 🔥
-                row.querySelector(".selected-column").onclick = (e) =>
-                    handleSelectClick(e, item.price, isAsk);
             }
 
-            // Actualizar celdas
-            const cells = row.children;
-            cells[0].firstElementChild.textContent = index + 1;
-            cells[1].firstElementChild.textContent = age;
-            cells[2].firstElementChild.textContent = formatPrice(item.price);
-            cells[3].firstElementChild.textContent = formatQuantity(item.qty);
-            cells[4].firstElementChild.textContent = formatUsdt(item.usdt);
-            cells[5].firstElementChild.textContent = percentage;
-            cells[6].firstElementChild.textContent = item.hits;
+            if (index < 5) {
+                row.classList.add("bold-row");
+            } else {
+                row.classList.remove("bold-row");
+            }
 
-            // Checkbox reflejando selección
-            const cb = cells[7].querySelector(".selection-checkbox");
-            cb.checked = selectedPrices.has(item.price);
-
-            // Estilos
-            if (index < 5) row.classList.add("bold-row");
-            else row.classList.remove("bold-row");
-
-            if (item.usdt >= LARGE_ORDER_THRESHOLD)
-                row.classList.add("color-purple", "bold-row");
-            else
+            if (item.usdt >= LARGE_ORDER_THRESHOLD) {
+                row.classList.add("color-purple");
+                row.classList.add("bold-row");
+            } else {
                 row.classList.remove("color-purple");
+            }
 
             const recentlyUpdated = item.lastUpdated && (now - item.lastUpdated) <= 1000;
-
             if (recentlyUpdated) {
                 const highlightClass = isAsk ? "highlight-red" : "highlight-green";
+                row.classList.remove("highlight-red", "highlight-green");
                 row.classList.add(highlightClass);
 
                 setTimeout(() => {
-                    row.classList.remove(highlightClass);
-                    if (item.usdt >= LARGE_ORDER_THRESHOLD)
-                        row.classList.add("color-purple", "bold-row");
+                    row.classList.remove("highlight-red", "highlight-green");
+                    if (item.usdt >= LARGE_ORDER_THRESHOLD) {
+                        row.classList.add("color-purple");
+                        row.classList.add("bold-row");
+                    }
                 }, 1000);
             }
 
-            if (selectedPrices.has(item.price))
+            const isSelected = selectedPrices.has(item.price);
+            if (isSelected) {
                 row.classList.add("selected-row");
-            else
+            } else {
                 row.classList.remove("selected-row");
+            }
+
+            row.innerHTML = `
+              <td><span>${index + 1}</span></td>
+              <td class="age-cell"><span>${age}</span></td>
+              <td class="price-cell"><span>${formatPrice(item.price)}</span></td>
+              <td><span>${formatQuantity(item.qty)}</span></td>
+              <td><span>${formatUsdt(item.usdt)}</span></td>
+              <td><span>${percentage}</span></td>
+              <td><span>${item.hits}</span></td>
+              <td class="selected-column"
+                  onclick="handleSelectClick(event, ${item.price}, ${isAsk})">
+                <input type="checkbox" class="selection-checkbox" ${isSelected ? 'checked' : ''}>
+              </td>
+            `;
 
             fragment.appendChild(row);
             existingRows.delete(item.price);
         });
 
-        // Eliminar filas que ya no existen
-        existingRows.forEach((row, price) => {
-            rowColors.delete(price);
+        existingRows.forEach(row => {
+            const priceCell = row.querySelector('.price-cell');
+            if (priceCell) {
+                const price = parseFloat(priceCell.textContent);
+                rowColors.delete(price);
+            }
             row.remove();
         });
 
-        // Insertar filas actualizadas
-        tableBody.innerHTML = "";
+        tableBody.innerHTML = '';
         tableBody.appendChild(fragment);
 
         redrawSelectedLines();
     }
-
-
-
-        // === FUNCIÓN FALTANTE ===
-    // Actualiza ambas tablas: ASKS y BIDS
-    function updateTables() {
-      updateTable("asks-body", futuresAsksData, true);
-      updateTable("bids-body", futuresBidsData, false);
-    }    
-       
+    
     // Función simplificada para colores
     function getColorClass(item, now) {
       if (item.usdt >= LARGE_ORDER_THRESHOLD) {
@@ -1742,6 +1482,7 @@
         }, 150);
       }
     }
+
    
     
     // Actualizar contadores de órdenes procesadas
@@ -1934,60 +1675,69 @@
       });
     }
 
-        // Congela solo la fila mientras el mouse está encima
-    function enableRowFreeze(tbody) {
-        tbody.addEventListener("mouseenter", (e) => {
-            const row = e.target.closest("tr");
-            if (row) row.classList.add("freeze-row");
-        }, true);
-
-        tbody.addEventListener("mouseleave", (e) => {
-            const row = e.target.closest("tr");
-            if (row) row.classList.remove("freeze-row");
-        }, true);
-    }
-
     // Modificación para el hover del checkbox
     function setupEventListeners() {
-        const asksBody = document.getElementById("asks-body");
-        const bidsBody = document.getElementById("bids-body");
+      const asksBody = document.getElementById("asks-body");
+      const bidsBody = document.getElementById("bids-body");
 
-        const bindTable = (tbody) => {
-            if (!tbody) return;
+      const bindTable = (tbody) => {
+        if (!tbody) return;
 
-            if (tbody.dataset.bound === "1") return;
-            tbody.dataset.bound = "1";
+        // Evita duplicar listeners si init() se dispara más de una vez
+        if (tbody.dataset.bound === "1") return;
+        tbody.dataset.bound = "1";
 
-            // Congela la fila mientras el mouse está encima
-            enableRowFreeze(tbody);
+        // 1) Click: si clicas checkbox NO copies precio.
+        //    Si clicas en price-cell => copiar.
+        tbody.addEventListener("click", (e) => {
+          
+          const priceCell = e.target.closest(".price-cell");
+          if (priceCell) {
+            handleTableClick(e); // tu función ya llama a copyPriceCell
+          }
+        });
 
-            // Click para copiar precio
-            tbody.addEventListener("click", (e) => {
-                const priceCell = e.target.closest(".price-cell");
-                if (priceCell) handleTableClick(e);
-            });
+        // 2) MouseDown en price-cell: selecciona texto para copiar rápido
+        tbody.addEventListener("mousedown", (e) => {
+          const priceCell = e.target.closest(".price-cell");
+          if (!priceCell) return;
+          handleTableMouseDown(e);
+        });
 
-            // Selección del precio con click en la celda SEL
-            tbody.addEventListener("click", (e) => {
-                const td = e.target.closest(".selected-column");
-                if (!td) return;
+        // 3) Hover checkbox: realmente no hace falta si no bloqueas pointer-events,
+        //    pero lo dejamos por compatibilidad con tu idea.
+        tbody.addEventListener("mouseover", (e) => {
+          const checkbox = e.target.closest('.selected-column input[type="checkbox"]');
+          if (checkbox) checkbox.style.pointerEvents = "auto";
+        });
+      };
 
-                const checkbox = td.querySelector(".selection-checkbox");
-                if (!checkbox) return;
+      bindTable(asksBody);
+      bindTable(bidsBody);
 
-                // Toggle inmediato
-                checkbox.checked = !checkbox.checked;
+      const symbolSearch = document.getElementById("symbol-search");
+      if (symbolSearch && !symbolSearch.dataset.bound) {
+        symbolSearch.dataset.bound = "1";
+        symbolSearch.addEventListener("change", (e) => {
+          const selectedSymbol = (e.target.value || "").toUpperCase().trim();
+          if (selectedSymbol) window.location.href = `?symbol=${selectedSymbol}`;
+        });
+      }
 
-                // Obtener precio
-                const price = parseFloat(td.parentElement.querySelector(".price-cell").textContent);
+      const intervalSelect = document.getElementById("interval-select");
+      if (intervalSelect && !intervalSelect.dataset.bound) {
+        intervalSelect.dataset.bound = "1";
+        intervalSelect.addEventListener("change", changeChartInterval);
+      }
 
-                const isAsk = (tbody.id === "asks-body");
-                togglePriceSelection(price, isAsk, checkbox);
-            });
-        };
-
-        bindTable(asksBody);
-        bindTable(bidsBody);
+      if (!window.__resizeBound) {
+        window.__resizeBound = true;
+        window.addEventListener("resize", () => {
+          if (!chart) return;
+          chart.resize(document.getElementById("chart-container").offsetWidth, 500);
+          redrawSelectedLines();
+        });
+      }
     }
 
     // Agrupa clusters cercanos para evitar saturación visual
@@ -2156,51 +1906,38 @@
     
     // Verificar condiciones para alertas
     function checkAlerts() {
-        if (!markPriceFutures || futuresBidsData.length === 0 || futuresAsksData.length === 0) return;
-
-        // ============================
-        //        SPREAD ALERT
-        // ============================
-        const spreadText = document.getElementById('market-spread').textContent;
-        const spreadMatch = spreadText.match(/\(([\d.]+)%\)/);
-
-        if (spreadMatch) {
-            const spread = parseFloat(spreadMatch[1]);
-            if (spread > ALERT_SETTINGS.spreadAlert) {
-                // ⬇️ NUEVA FUNCIÓN SIN SPAM
-                createSpreadAlert(spread.toFixed(2));
-            }
+      if (!markPriceFutures || futuresBidsData.length === 0 || futuresAsksData.length === 0) return;
+      
+      const spreadText = document.getElementById('market-spread').textContent;
+      const spreadMatch = spreadText.match(/\(([\d.]+)%\)/);
+      if (spreadMatch) {
+        const spread = parseFloat(spreadMatch[1]);
+        if (spread > ALERT_SETTINGS.spreadAlert) {
+          showAlert(`Spread alto: ${spread.toFixed(2)}%`, 'spread');
         }
-
-        // ============================
-        //        IMBALANCE ALERT
-        // ============================
-        const imbalanceText = document.getElementById('orderbook-imbalance').textContent;
-        const imbalance = parseFloat(imbalanceText);
-
-        if (Math.abs(imbalance) > ALERT_SETTINGS.imbalanceAlert) {
-            const direction = imbalance > 0 ? "COMPRA" : "VENTA";
-            showAlert(`Desequilibrio extremo (${direction}): ${Math.abs(imbalance).toFixed(2)}%`, 'imbalance');
-        }
-
-        // ============================
-        //     LIQUIDEZ INUSUAL
-        // ============================
-        const bidLiquidityText = document.getElementById('total-bid-liquidity').textContent;
-        const askLiquidityText = document.getElementById('total-ask-liquidity').textContent;
-
-        const bidLiquidity = parseFloat(bidLiquidityText.replace(/[^0-9.]/g, ''));
-        const askLiquidity = parseFloat(askLiquidityText.replace(/[^0-9.]/g, ''));
-
-        if (bidLiquidity > ALERT_SETTINGS.volumeAlert) {
-            showAlert(`Liquidez BID inusual: ${formatUsdt(bidLiquidity)}`, 'volume');
-        }
-
-        if (askLiquidity > ALERT_SETTINGS.volumeAlert) {
-            showAlert(`Liquidez ASK inusual: ${formatUsdt(askLiquidity)}`, 'volume');
-        }
+      }
+      
+      const imbalanceText = document.getElementById('orderbook-imbalance').textContent;
+      const imbalance = parseFloat(imbalanceText);
+      if (Math.abs(imbalance) > ALERT_SETTINGS.imbalanceAlert) {
+        const direction = imbalance > 0 ? "COMPRA" : "VENTA";
+        showAlert(`Desequilibrio extremo (${direction}): ${Math.abs(imbalance).toFixed(2)}%`, 'imbalance');
+      }
+      
+      const bidLiquidityText = document.getElementById('total-bid-liquidity').textContent;
+      const askLiquidityText = document.getElementById('total-ask-liquidity').textContent;
+      
+      const bidLiquidity = parseFloat(bidLiquidityText.replace(/[^0-9.]/g, ''));
+      const askLiquidity = parseFloat(askLiquidityText.replace(/[^0-9.]/g, ''));
+      
+      if (bidLiquidity > ALERT_SETTINGS.volumeAlert) {
+        showAlert(`Liquidez BID inusual: ${formatUsdt(bidLiquidity)}`, 'volume');
+      }
+      
+      if (askLiquidity > ALERT_SETTINGS.volumeAlert) {
+        showAlert(`Liquidez ASK inusual: ${formatUsdt(askLiquidity)}`, 'volume');
+      }
     }
-
     
     // Mostrar alerta en el sistema
     function showAlert(message, type) {
@@ -2703,30 +2440,13 @@
     function handleTableClick(event) {
       const cell = event.target.closest('.price-cell');
       if (!cell) return;
-      
-      copyPriceCell({target: cell});
+
+      event.stopPropagation();
+      event.preventDefault();
+
+      copyPriceCell(event);  
     }
 
-    function handleSelectClick(event, price, isAsk) {
-        event.stopPropagation();
-
-        // Siempre encuentra el TD, no el checkbox
-        const td = event.target.closest(".selected-column");
-        if (!td) return;
-
-        const cb = td.querySelector(".selection-checkbox");
-        if (!cb) return;
-
-        // Alternar estado
-        cb.checked = !cb.checked;
-
-        togglePriceSelection(price, isAsk, cb);
-    }
-
-    
-    /* ============================
-       📌 COPIAR PRECIO
-    ============================ */
     function copyPriceCell(event) {
       const cell = event.target.closest('.price-cell');
       if (!cell) return;
@@ -2737,67 +2457,51 @@
       navigator.clipboard.writeText(text).then(() => {
         cell.classList.add("copied");
         setTimeout(() => cell.classList.remove("copied"), 500);
-      }).catch(() => {
+        isInteracting = false;
+      }).catch(err => {
+        console.error("Error al copiar:", err);
         copyWithFallback(text, cell);
       });
 
       event.preventDefault();
+      event.stopPropagation();
     }
 
+    function handleSelectClick(event, price, isAsk) {
+        event.stopPropagation();
+
+        freezeRow(price); // <<--- congela solo esa fila
+
+        const td = event.currentTarget;
+        const checkbox = td.querySelector(".selection-checkbox");
+        if (!checkbox) return;
+
+        checkbox.checked = !checkbox.checked;
+        togglePriceSelection(price, isAsk, checkbox);
+    }    
+    
     function copyWithFallback(text, cell) {
       const textArea = document.createElement("textarea");
       textArea.value = text;
       textArea.style.position = "fixed";
       textArea.style.opacity = "0";
       document.body.appendChild(textArea);
+      textArea.focus();
       textArea.select();
-
+      
       try {
-        document.execCommand("copy");
+        document.execCommand('copy');
         cell.classList.add("copied");
         setTimeout(() => cell.classList.remove("copied"), 500);
+        isInteracting = false;
       } catch (err) {
-        console.error("Error al copiar:", err);
+        console.error("Error al copiar con fallback:", err);
+      } finally {
+        document.body.removeChild(textArea);
       }
-
-      document.body.removeChild(textArea);
     }
 
-    /* ============================
-       📌 ALERTA DE SPREAD
-    ============================ */
-    function createSpreadAlert(percentage) {
-      const now = Date.now();
-      if (now - lastSpreadAlertTime < 4000) return;
-      lastSpreadAlertTime = now;
-
-      const alertsContainer = document.getElementById("alert-container");
-      if (!alertsContainer) return;
-
-      if (spreadAlertElement) spreadAlertElement.remove();
-
-      spreadAlertElement = document.createElement("div");
-      spreadAlertElement.className = "market-alert spread-alert";
-      spreadAlertElement.innerHTML = `
-        <span class="alert-time">${new Date().toLocaleTimeString()}</span>
-        <span class="alert-message">Spread alto: ${percentage}%</span>
-        <button class="alert-close" onclick="this.parentElement.remove()">✖</button>
-      `;
-
-      alertsContainer.prepend(spreadAlertElement);
-
-      setTimeout(() => {
-        if (spreadAlertElement) {
-          spreadAlertElement.remove();
-          spreadAlertElement = null;
-        }
-      }, 10000);
-    }
-
-
-    /* ============================
-       🚀 INICIALIZACIÓN
-    ============================ */
+    // Inicialización
     function init() {
       loadSelectedPrices();
       setupEventListeners();
@@ -2805,66 +2509,20 @@
       setInterval(updateTimestamp, 1000);
       loadCryptoPairs();
       initAlerts();
-
+      
       // Exponer funciones globales
+      window.toggleClusters = toggleClusters;
+      window.togglePriceSelection = togglePriceSelection;
+      window.autoScaleChart = autoScaleChart;
+      window.updateThresholds = updateThresholds;
+      window.toggleSoundAlerts = toggleSoundAlerts;
+      window.toggleLiquidityHeatmap = toggleLiquidityHeatmap;
+      window.saveKeyLevels = saveKeyLevels;
       window.copyPriceCell = copyPriceCell;
     }
-
-    document.addEventListener("DOMContentLoaded", init);
-
-
-    /* =======================================================
-       🔍 FIX DEFINITIVO BUSCADOR DE SÍMBOLOS
-       YA FUNCIONA SIEMPRE — SIN BLOQUEOS
-    ======================================================= */
-    document.addEventListener("DOMContentLoaded", () => {
-        const search = document.getElementById("symbol-search");
-        if (!search) return;
-
-        // Cambiar par con un solo click en el datalist
-        search.addEventListener("input", () => {
-            const s = search.value.trim().toUpperCase();
-            if (!s) return;
-
-            if (!s.endsWith("USDT") || s.length < 6) return;
-
-            window.location.href = `?symbol=${s}`;
-        });
-    });
-
-
-    /* =======================================================
-       ✅ FIX REAL — CLICK EN CELDA “SEL” PERFECTO
-       Sin congelar la tabla — sin perder filas — sin delay
-    ======================================================= */
-
-    // CSS recomendado (agrégalo en tu <style>)
-    /*
-    .selected-column { cursor: pointer; }
-    .selected-column input { pointer-events: none; }
-    */
-
-    document.addEventListener("click", (e) => {
-      const td = e.target.closest(".selected-column");
-      if (!td) return;
-
-      const checkbox = td.querySelector(".selection-checkbox");
-      if (!checkbox) return;
-
-      checkbox.checked = !checkbox.checked;
-
-      const priceCell = td.parentElement.querySelector(".price-cell");
-      if (!priceCell) return;
-
-      const price = parseFloat(priceCell.textContent);
-      const isAsk = td.parentElement.classList.contains("ask-row");
-
-      togglePriceSelection(price, isAsk, checkbox);
-
-      e.preventDefault();
-      e.stopPropagation();
-    });
-
+    
+    // Iniciar la aplicación
+    document.addEventListener('DOMContentLoaded', init);
   </script>
 </body>
 </html>
