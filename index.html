@@ -1113,146 +1113,190 @@
     
     // WebSocket para depth (libro de órdenes)
     function initializeDepthSocket() {
-      const socket = new WebSocket(futuresWsUrl);
-      
-      socket.onopen = () => {
-        updateWsStatus(`WebSocket: Conectado (Depth)`);
-      };
-      
-      socket.onerror = (error) => {
-        showError(`Error en Depth WebSocket: ${error.message || 'Desconocido'}`);
-      };
-      
-      socket.onclose = () => {
-        updateWsStatus("WebSocket: Reconectando (Depth)...");
-        setTimeout(initializeDepthSocket, 3000);
-      };
-      
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const now = Date.now();
-          
-          if (data.a && Array.isArray(data.a)) {
-            futuresAsksData = updateOrders(futuresAsksData, data.a, now, true);
-            asksProcessed += data.a.length;
-            
-            // Verificar órdenes institucionales en asks
-            data.a.forEach(([p, q]) => {
-              const price = parseFloat(p);
-              const quantity = parseFloat(q);
-              const usdtValue = price * quantity;
-              
-              if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
-                showOrderAlert('ask', usdtValue, true);
-              } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
-                showOrderAlert('ask', usdtValue, false);
-              }
-            });
-          }
-          
-          if (data.b && Array.isArray(data.b)) {
-            futuresBidsData = updateOrders(futuresBidsData, data.b, now, false);
-            bidsProcessed += data.b.length;
-            
-            // Verificar órdenes institucionales en bids
-            data.b.forEach(([p, q]) => {
-              const price = parseFloat(p);
-              const quantity = parseFloat(q);
-              const usdtValue = price * quantity;
-              
-              if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
-                showOrderAlert('bid', usdtValue, true);
-              } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
-                showOrderAlert('bid', usdtValue, false);
-              }
-            });
-          }
-          
-          updateProcessedCounters();
-          updateLiquidityStats();
-          updateOrderBookImbalance();
-          trackLiquidityChanges();
-        } catch (err) {
-          showError(`Error al procesar mensaje de Depth: ${err.message}`);
+
+        // Cerrar conexión previa si existe
+        if (window.depthSocket) {
+            try { window.depthSocket.close(); } catch (e) {}
         }
-      };
+
+        console.log("🔄 Conectando DEPTH WebSocket...");
+
+        window.depthSocket = new WebSocket(
+            `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@depth@100ms`
+        );
+
+        // === Abierto ===
+        window.depthSocket.onopen = () => {
+            console.log("✅ DEPTH conectado");
+            updateWsStatus("WebSocket: Conectado (Depth)");
+        };
+
+        // === Error ===
+        window.depthSocket.onerror = (error) => {
+            console.warn("⚠️ Error en DEPTH:", error);
+
+            // Reconexión suave siempre, sin límite
+            setTimeout(() => {
+                console.log("♻️ Reintentando DEPTH por error...");
+                initializeDepthSocket();
+            }, 1200);
+        };
+
+        // === Cerrado ===
+        window.depthSocket.onclose = (event) => {
+            console.warn("❌ DEPTH cerrado:", event);
+
+            // Siempre reconectar
+            setTimeout(() => {
+                console.log("♻️ Reconectando DEPTH...");
+                initializeDepthSocket();
+            }, 1500);
+        };
+
+        // === Mensajes ===
+        window.depthSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                const now = Date.now();
+
+                // ------- ASKS -------
+                if (data.a && Array.isArray(data.a)) {
+
+                    futuresAsksData = updateOrders(futuresAsksData, data.a, now, true);
+                    asksProcessed += data.a.length;
+
+                    data.a.forEach(([p, q]) => {
+                        const price = parseFloat(p);
+                        const qty = parseFloat(q);
+                        const usdt = price * qty;
+
+                        if (usdt >= VERY_LARGE_ORDER_THRESHOLD) {
+                            showOrderAlert('ask', usdt, true);
+                        } else if (usdt >= LARGE_ORDER_THRESHOLD) {
+                            showOrderAlert('ask', usdt, false);
+                        }
+                    });
+                }
+
+                // ------- BIDS -------
+                if (data.b && Array.isArray(data.b)) {
+
+                    futuresBidsData = updateOrders(futuresBidsData, data.b, now, false);
+                    bidsProcessed += data.b.length;
+
+                    data.b.forEach(([p, q]) => {
+                        const price = parseFloat(p);
+                        const qty = parseFloat(q);
+                        const usdt = price * qty;
+
+                        if (usdt >= VERY_LARGE_ORDER_THRESHOLD) {
+                            showOrderAlert('bid', usdt, true);
+                        } else if (usdt >= LARGE_ORDER_THRESHOLD) {
+                            showOrderAlert('bid', usdt, false);
+                        }
+                    });
+                }
+
+                updateProcessedCounters();
+                updateLiquidityStats();
+                updateOrderBookImbalance();
+                trackLiquidityChanges();
+
+            } catch (err) {
+                console.error("❌ Error procesando DEPTH:", err);
+            }
+        };
     }
     
     // WebSocket para velas en tiempo real
     function initializeKlineSocket() {
-      if (klineSocket) {
-        klineSocket.close();
-      }
-      
-      klineSocket = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`);
-      
-      klineSocket.onopen = () => {
-        updateWsStatus(`WebSocket: Conectado (Kline)`);
-        reconnectAttempts = 0; // Resetear contador de reconexión
-        loadHistoricalKlines();
-      };
-      
-      klineSocket.onerror = (error) => {
-        showError(`Error en Kline WebSocket: ${error.message || 'Desconocido'}`);
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-          setTimeout(initializeKlineSocket, delay);
-          reconnectAttempts++;
-        } else {
-          showError("Maximo de reconexiones alcanzado. Recargue la página.");
+
+        // Cerrar socket previo si existe
+        if (klineSocket) {
+            try { klineSocket.close(); } catch (e) {}
         }
-      };
-      
-      klineSocket.onclose = () => {
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          updateWsStatus("WebSocket: Reconectando (Kline)...");
-          setTimeout(initializeKlineSocket, 3000);
-          reconnectAttempts++;
-        }
-      };
-      
-      klineSocket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const kline = data.k;
-          
-          const newCandle = {
-            time: Math.floor(kline.t / 1000),
-            open: parseFloat(kline.o),
-            high: parseFloat(kline.h),
-            low: parseFloat(kline.l),
-            close: parseFloat(kline.c)
-          };
-          
-          if (kline.x) { // Vela cerrada
-            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
-              candlesData[candlesData.length - 1] = newCandle;
-            } else {
-              candlesData.push(newCandle);
-              if (candlesData.length > 150) candlesData.shift();
+
+        console.log("🔄 Conectando Kline WebSocket:", currentInterval);
+        
+        klineSocket = new WebSocket(
+            `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`
+        );
+
+        klineSocket.onopen = () => {
+            console.log("✅ Kline conectado");
+            updateWsStatus(`WebSocket: Conectado (Kline)`);
+
+            // Cargar historial otra vez cuando se reconecta
+            loadHistoricalKlines();
+        };
+
+        // ⛔ Binance manda error "desconocido" → reconectar suave
+        klineSocket.onerror = (error) => {
+            console.warn("⚠️ Error en KLINE:", error);
+            
+            // Esperar y reconectar siempre
+            setTimeout(() => {
+                console.log("♻️ Reiniciando Kline por error...");
+                initializeKlineSocket();
+            }, 1500);
+        };
+
+        // ❌ Binance puede cerrar sin razón → reconectar siempre
+        klineSocket.onclose = (event) => {
+            console.warn("❌ Kline cerrado:", event);
+
+            // Intentar reconectar cada 2 segundos SIEMPRE
+            setTimeout(() => {
+                console.log("♻️ Reintentando conexión Kline...");
+                initializeKlineSocket();
+            }, 2000);
+        };
+
+        // 📩 Recibir Klines
+        klineSocket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                const kline = data.k;
+
+                const newCandle = {
+                    time: Math.floor(kline.t / 1000),
+                    open: parseFloat(kline.o),
+                    high: parseFloat(kline.h),
+                    low: parseFloat(kline.l),
+                    close: parseFloat(kline.c)
+                };
+
+                // Vela cerrada
+                if (kline.x) {
+                    if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+                        candlesData[candlesData.length - 1] = newCandle;
+                    } else {
+                        candlesData.push(newCandle);
+                        if (candlesData.length > 150) candlesData.shift();
+                    }
+                } 
+                // Vela en progreso
+                else {
+                    if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+                        candlesData[candlesData.length - 1] = newCandle;
+                    } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
+                        candlesData.push(newCandle);
+                        if (candlesData.length > 150) candlesData.shift();
+                    }
+                }
+
+                // Actualizar gráfico
+                if (candlestickSeries) {
+                    candlestickSeries.setData(candlesData);
+                    const ema100 = calculateEMA(candlesData, 100);
+                    if (emaSeries) emaSeries.setData(ema100);
+                }
+
+            } catch (err) {
+                console.error("❌ Error procesando Kline:", err);
             }
-            lastCandle = newCandle;
-          } else { // Vela en progreso
-            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
-              candlesData[candlesData.length - 1] = newCandle;
-            } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
-              candlesData.push(newCandle);
-              if (candlesData.length > 150) candlesData.shift();
-            }
-          }
-          
-          if (candlestickSeries) {
-            candlestickSeries.setData(candlesData);
-            const ema100 = calculateEMA(candlesData, 100);
-            if (emaSeries) emaSeries.setData(ema100);
-          }
-        } catch (err) {
-          showError(`Error al procesar mensaje de Kline: ${err.message}`);
-        }
-      };
-    }
-    
+        };
+    }    
     // Mostrar alerta visual para órdenes institucionales
     function showOrderAlert(type, value, isVeryLarge) {
       const panelTitle = document.querySelector(`.${type}s-title`);
