@@ -1282,7 +1282,7 @@
     <!-- 🔥 BARRA SUPERIOR FIJA (TradingView) -->    
   <div class="header-controls">
     <div class="header-left">
-      <div class="search-container">
+      <div class="search-container hide-when-fullscreen">
         <label for="symbol-search">Buscar par USDT:</label>
         <input type="text" id="symbol-search" placeholder="Ejemplo: BTCUSDT" list="symbol-list" autocomplete="off" aria-label="Buscar par de trading">
         <datalist id="symbol-list"></datalist>
@@ -1902,77 +1902,164 @@
 
     // WebSocket para velas en tiempo real
     function initializeKlineSocket() {
+      // 🔍 DEBUG: Verificar símbolo e intervalo
+      console.log("🔍 DEBUG - Symbol:", symbol, "Interval:", currentInterval);
+      
+      // Cerrar conexión anterior si existe
       if (klineSocket) {
         klineSocket.close();
       }
       
-      klineSocket = new WebSocket(`wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`);
+      // 🔥 CONVERTIR INTERVALO A MINÚSCULA
+      const interval = currentInterval.toLowerCase();
       
+      // 🔥 LISTA DE INTERVALOS VÁLIDOS PARA FUTUROS BINANCE
+      const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
+      
+      // 🔥 VALIDAR INTERVALO - Si no es válido, usar 1h por defecto
+      if (!validIntervals.includes(interval)) {
+        console.warn(`⚠️ Intervalo "${currentInterval}" no válido. Usando "1h" por defecto.`);
+        currentInterval = '1h';
+      } else {
+        currentInterval = interval;
+      }
+      
+      // 🔥 CONSTRUIR URL CORRECTA
+      const wsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`;
+      console.log("🔗 Conectando a WebSocket:", wsUrl);
+      
+      // CREAR WEBSOCKET
+      klineSocket = new WebSocket(wsUrl);
+      
+      // ============================================
+      // 🔔 EVENTO: CONEXIÓN ABIERTA
+      // ============================================
       klineSocket.onopen = () => {
+        console.log("✅ WebSocket Kline conectado exitosamente");
         updateWsStatus(`WebSocket: Conectado (Kline)`);
-        reconnectAttempts = 0; // Resetear contador de reconexión
-        loadHistoricalKlines();
+        reconnectAttempts = 0; // Resetear contador de reconexiones
+        loadHistoricalKlines(); // Cargar datos históricos
       };
       
+      // ============================================
+      // 🔔 EVENTO: ERROR DE CONEXIÓN
+      // ============================================
       klineSocket.onerror = (error) => {
-        showError(`Error en Kline WebSocket: ${error.message || 'Desconocido'}`);
+        console.error("❌ Error en WebSocket Kline:", error);
+        
+        // 🔥 SOLO MOSTRAR PRIMER ERROR (evitar spam)
+        if (reconnectAttempts === 0) {
+          showError(`Error en Kline WebSocket: ${error.message || 'Desconocido'}`);
+        }
+        
+        // 🔥 INTENTAR RECONEXIÓN CON BACKOFF EXPONENCIAL
         if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-          setTimeout(initializeKlineSocket, delay);
+          console.log(`🔄 Reintentando conexión en ${delay}ms... (Intento ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+          
+          setTimeout(() => {
+            initializeKlineSocket();
+          }, delay);
+          
           reconnectAttempts++;
         } else {
-          showError("Maximo de reconexiones alcanzado. Recargue la página.");
+          // 🔥 MÁXIMO DE RECONEXIONES ALCANZADO
+          if (reconnectAttempts === MAX_RECONNECT_ATTEMPTS) {
+            showError("⚠️ No se pudo conectar al WebSocket de velas. El gráfico no se actualizará en vivo, pero los datos históricos estarán disponibles.");
+            console.warn("Máximo de reconexiones alcanzado. WebSocket Kline desactivado.");
+          }
         }
       };
       
+      // ============================================
+      // 🔔 EVENTO: CONEXIÓN CERRADA
+      // ============================================
       klineSocket.onclose = () => {
+        console.log("🔌 WebSocket Kline cerrado");
+        
+        // 🔥 INTENTAR RECONEXIÓN AUTOMÁTICA
         if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
           updateWsStatus("WebSocket: Reconectando (Kline)...");
-          setTimeout(initializeKlineSocket, 3000);
+          setTimeout(() => {
+            initializeKlineSocket();
+          }, 3000);
           reconnectAttempts++;
         }
       };
       
+      // ============================================
+      // 🔔 EVENTO: MENSAJE RECIBIDO (VELAS EN VIVO)
+      // ============================================
       klineSocket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           const kline = data.k;
           
+          // 🔥 CREAR NUEVA VELA
           const newCandle = {
-            time: Math.floor(kline.t / 1000),
+            time: Math.floor(kline.t / 1000), // Convertir a segundos
             open: parseFloat(kline.o),
             high: parseFloat(kline.h),
             low: parseFloat(kline.l),
             close: parseFloat(kline.c)
           };
           
+          // 🔥 MANEJO DE VELAS CERRADAS
           if (kline.x) { // Vela cerrada
             if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+              // Actualizar vela existente
               candlesData[candlesData.length - 1] = newCandle;
             } else {
+              // Añadir nueva vela
               candlesData.push(newCandle);
-              if (candlesData.length > 150) candlesData.shift();
+              
+              // 🔥 LIMITAR A 1000 VELAS EN MEMORIA
+              if (candlesData.length > 1000) {
+                candlesData.shift(); // Eliminar la más antigua
+              }
             }
             lastCandle = newCandle;
-          } else { // Vela en progreso
+          } 
+          // 🔥 MANEJO DE VELAS EN PROGRESO
+          else { 
             if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+              // Actualizar vela en progreso existente
               candlesData[candlesData.length - 1] = newCandle;
             } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
+              // Añadir nueva vela en progreso
               candlesData.push(newCandle);
-              if (candlesData.length > 150) candlesData.shift();
+              
+              // 🔥 LIMITAR A 1000 VELAS EN MEMORIA
+              if (candlesData.length > 1000) {
+                candlesData.shift();
+              }
             }
           }
           
+          // 🔥 ACTUALIZAR GRÁFICO SI EXISTE
           if (candlestickSeries) {
+            // Actualizar velas (sin auto-scroll)
             candlestickSeries.setData(candlesData);
+            
+            // 🔥 CALCULAR EMA CON LAS 1000 VELAS
             const ema100 = calculateEMA(candlesData, 100);
-            if (emaSeries) emaSeries.setData(ema100);
+            if (emaSeries) {
+              emaSeries.setData(ema100);
+            }
+            
+            // ⚠️ NO HACER AUTO-SCROLL - EL GRÁFICO MANTIENE SU POSICIÓN
+            // ❌ NO: chart.timeScale().scrollToPosition(0, false);
+            // ❌ NO: chart.timeScale().scrollToRealTime();
+            // ❌ NO: chart.timeScale().fitContent();
           }
+          
         } catch (err) {
+          console.error("❌ Error procesando vela en vivo:", err);
           showError(`Error al procesar mensaje de Kline: ${err.message}`);
         }
       };
     }
+    
     
     // Mostrar alerta visual para órdenes institucionales
     function showOrderAlert(type, value, isVeryLarge) {
@@ -2678,63 +2765,60 @@
     
     // Manejo de gráfico
     function initializeChart() {
-        try {
-            const chartContainer = document.getElementById("chart-container");
-            if (!chartContainer) return;
+      try {
+        const chartContainer = document.getElementById("chart-container");
+        if (!chartContainer) return;
 
-            const loadingMsg = chartContainer.querySelector('.loading-message');
-            if (loadingMsg) {
-                loadingMsg.style.display = 'block';
-                loadingMsg.textContent = "Inicializando gráfico...";
-            }
-
-            if (chart) {
-                chart.remove();
-                chart = null;
-                candlestickSeries = null;
-                emaSeries = null;
-            }
-
-            chart = LightweightCharts.createChart(chartContainer, {
-                width: chartContainer.offsetWidth,
-                height: 400,
-                layout: { backgroundColor: '#0f0f0f', textColor: '#d1d4dc' },
-                grid: { vertLines: { color: '#333' }, horzLines: { color: '#333' }},
-                handleScroll: {
-                    mouseWheel: true,
-                    pressedMouseMove: true,
-                    horzTouchDrag: true,
-                    vertTouchDrag: true,
-                },
-                handleScale: {
-                    axisPressedMouseMove: true,
-                    mouseWheel: true,
-                    pinch: true,
-                },
-            });
-
-
-            // ⭐⭐⭐⭐⭐ CANVAS HEATMAP PRO ⭐⭐⭐⭐⭐
-            setupHeatmapCanvas();
-
-            candlestickSeries = chart.addCandlestickSeries({
-                upColor: '#00ff00',
-                downColor: '#ff0000',
-            });
-
-            emaSeries = chart.addLineSeries({
-                color: '#ff9800',
-                lineWidth: 2,
-                extendToLastBar: true,        // ⭐ EMA hasta el final del gráfico
-                priceLineVisible: false       // ⭐ TradingView style
-            });
-
-
-        } catch (err) {
-            showError(`Error al inicializar el gráfico: ${err.message}`);
+        const loadingMsg = chartContainer.querySelector('.loading-message');
+        if (loadingMsg) {
+          loadingMsg.style.display = 'block';
+          loadingMsg.textContent = "Inicializando gráfico...";
         }
-    }
 
+        if (chart) {
+          chart.remove();
+          chart = null;
+          candlestickSeries = null;
+          emaSeries = null;
+        }
+
+        chart = LightweightCharts.createChart(chartContainer, {
+          width: chartContainer.offsetWidth,
+          height: 400,
+          layout: { backgroundColor: '#0f0f0f', textColor: '#d1d4dc' },
+          grid: { vertLines: { color: '#333' }, horzLines: { color: '#333' }},
+          handleScroll: {
+            mouseWheel: true,
+            pressedMouseMove: true,
+            horzTouchDrag: true,
+            vertTouchDrag: true,
+          },
+          handleScale: {
+            axisPressedMouseMove: true,
+            mouseWheel: true,
+            pinch: true,
+          },
+        });
+
+        setupHeatmapCanvas();
+
+        candlestickSeries = chart.addCandlestickSeries({
+          upColor: '#00ff00',
+          downColor: '#ff0000',
+        });
+
+        emaSeries = chart.addLineSeries({
+          color: '#ff9800',
+          lineWidth: 2,
+          extendToLastBar: true,
+          extendToRightEdge: true,
+          priceLineVisible: false
+        });
+
+      } catch (err) {
+        showError(`Error al inicializar el gráfico: ${err.message}`);
+      }
+    }
         // ===============================
     // 🔥 SISTEMA LIMPIO DE ZONAS SMC
     // ===============================
@@ -2840,25 +2924,23 @@
         const y = candlestickSeries.priceToCoordinate(price);
         return y === undefined ? null : y;
     }
-
-
     // Autoajustar gráfico
     function autoScaleChart() {
       if (chart) {
         chart.timeScale().fitContent();
-        chart.priceScale().applyOptions({
-          autoScale: true,
-        });
       }
     }
-    
+
     // Cargar datos históricos de velas
     async function loadHistoricalKlines() {
       try {
         const loadingMsg = document.querySelector('.loading-message');
         if (loadingMsg) loadingMsg.textContent = "Cargando datos históricos...";
         
-        const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${currentInterval}&limit=150`);
+        // 🔥 CAMBIA A 1000 VELAS HISTÓRICAS
+        const candleLimit = 1000;  // Cambiado 500 → 1000
+        
+        const response = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${currentInterval}&limit=${candleLimit}`);
         if (!response.ok) throw new Error(`Error HTTP: ${response.status}`);
         
         const data = await response.json();
@@ -2870,41 +2952,71 @@
           close: parseFloat(kline[4]),
         }));
         
+        // 🔥 MANTENER SOLO 1000 VELAS
+        if (candlesData.length > 1000) candlesData = candlesData.slice(-1000);  // Cambiado -500 → -1000
+        
         if (candlestickSeries) {
           candlestickSeries.setData(candlesData);
+          
+          // 🔥 CALCULA EMA CON 1000 VELAS
           const ema100 = calculateEMA(candlesData, 100);
           if (emaSeries) emaSeries.setData(ema100);
-          chart.timeScale().fitContent();
+          
+          //chart.timeScale().fitContent();
           
           const loadingMsg = document.querySelector('.loading-message');
-        if (loadingMsg) loadingMsg.style.display = 'none';
+          if (loadingMsg) loadingMsg.style.display = 'none';
         }
       } catch (err) {
         showError(`Error al cargar el historial de velas: ${err.message}`);
-        const loadingMsg = document.querySelector('.loading-message');
-        if (loadingMsg) loadingMsg.textContent = "Error cargando datos. Intentando reconectar...";
-        
-        setTimeout(loadHistoricalKlines, 5000);
+        // ... resto del código ...
       }
     }
-    
+
     function calculateEMA(data, period) {
-      if (data.length < period) return [];
+      if (!data || data.length === 0) return [];
       
       const k = 2 / (period + 1);
       const emaData = [];
-      let ema = data.slice(0, period).reduce((sum, candle) => sum + candle.close, 0) / period;
       
-      emaData.push({ time: data[period - 1].time, value: ema });
-      
-      for (let i = period; i < data.length; i++) {
-        ema = (data[i].close * k) + (ema * (1 - k));
-        emaData.push({ time: data[i].time, value: ema });
+      // Para EMA 100, necesitamos al menos 100 puntos para buen cálculo
+      if (data.length < period) {
+        // Si hay pocos datos, calcular EMA progresiva
+        let ema = data[0].close;
+        emaData.push({ time: data[0].time, value: ema });
+        
+        for (let i = 1; i < data.length; i++) {
+          ema = (data[i].close * k) + (ema * (1 - k));
+          emaData.push({ time: data[i].time, value: ema });
+        }
+      } else {
+        // Si hay suficientes datos, calcular EMA estándar
+        // Calcular SMA inicial para los primeros 'period' datos
+        let sma = 0;
+        for (let i = 0; i < period; i++) {
+          sma += data[i].close;
+        }
+        let ema = sma / period;
+        
+        // Primer punto EMA (en la posición 'period-1')
+        emaData.push({ 
+          time: data[period - 1].time, 
+          value: ema 
+        });
+        
+        // Calcular EMA para el resto
+        for (let i = period; i < data.length; i++) {
+          ema = (data[i].close * k) + (ema * (1 - k));
+          emaData.push({ 
+            time: data[i].time, 
+            value: ema 
+          });
+        }
       }
       
       return emaData;
     }
-    
+
     // Manejo de líneas de precio seleccionadas
     function drawSelectedPriceLine(price, isAsk) {
       if (!chart || !candlestickSeries) return;
