@@ -1494,12 +1494,12 @@
     const params = new URLSearchParams(window.location.search);
     const symbol = params.get("symbol") || "BTCUSDT";
     //document.getElementById("symbol-title").innerText = `${symbol}: 0.0000 USDT`;
-    
+
     // URLs de WebSocket
     const futuresWsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@depth@100ms`;
     const futuresMarkPriceWsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@markPrice@1s`;
     const tickerWsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@ticker`;
-    
+
     // Variables de estado
     let markPriceFutures = 0;
     let lastPriceUpdate = 0;
@@ -1514,6 +1514,29 @@
     const rowColors = new Map();
     const COLOR_DURATION_MS = 5000;
     let selectedPrices = new Map();
+
+    // =====================================================
+    // 🧠 SISTEMA DE BACKTESTING INTELIGENTE
+    // =====================================================
+    let zoneBacktestData = JSON.parse(localStorage.getItem(`zoneBacktest_${symbol}`)) || {
+        zones: {},
+        dailyStats: {},
+        correlations: {},
+        optimalThresholds: {}
+    };
+
+    let currentSessionStats = {
+        startTime: Date.now(),
+        ordersAtStart: 0,
+        zonesHit: 0,
+        successfulRebounds: 0,
+        failedRebounds: 0,
+        totalZones: 0
+    };
+
+    let isBacktestMonitoring = true;
+
+    // Continuación de tus variables existentes...
     let currentInterval = localStorage.getItem('chartInterval') || '1h';
     document.getElementById('interval-select').value = currentInterval;
     let asksPriceMap = new Map();
@@ -1540,10 +1563,327 @@
     let heatmapCanvas = null;    
     let glassmapDensity = {};
 
-    let lastHeaderPrice = null; 
+    let lastHeaderPrice = null;
+
+    // 🔥 AGREGAR ESTAS 3 LÍNEAS PARA HISTORIAL DIARIO
+    // =====================================================
+    // 📅 SISTEMA DE HISTORIAL DIARIO
+    // =====================================================
+    let dailyZonesHistory = JSON.parse(localStorage.getItem(`dailyZonesHistory_${symbol}`)) || {};
+    let autoSaveInterval = null;
+    let lastAutoSave = Date.now();
 
     function recordGlassmapLiquidity(price, usdt) {
         glassmapDensity[price] = (glassmapDensity[price] || 0) + usdt;
+    }
+
+    // =====================================================
+    // 🔥 NUEVO MANAGER DE WEBSOCKETS (VERSIÓN SIMPLIFICADA)
+    // =====================================================
+
+    class BinanceWebSocketManager {
+        constructor(symbol = 'BTCUSDT') {
+            this.symbol = symbol.toLowerCase();
+            this.wsInstances = new Map();
+        }
+
+        // CONECTAR TODOS
+        connectAll(interval = '1h') {
+            this.connectTicker();
+            this.connectMarkPrice();
+            this.connectDepth();
+            this.connectKline(interval);
+        }
+
+        // TICKER
+        connectTicker() {
+            const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@ticker`;
+            this.createWebSocket('ticker', wsUrl, (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    const now = Date.now();
+
+                    if (data.c !== undefined) {
+                        let newPrice = Number(data.c);
+                        const cambio24h = data.P ? Number(data.P) : 0;
+
+                        markPriceFutures = newPrice;
+                        lastPriceUpdate = now;
+
+                        updateHeaderPrice(newPrice, cambio24h);
+                        updateTimestamp();
+                        scheduleTableUpdate();
+                        updateMarketSpread();
+                    }
+                } catch (err) {
+                    console.error('Error en ticker:', err);
+                }
+            });
+        }
+
+        // MARK PRICE
+        connectMarkPrice() {
+            const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@markPrice@1s`;
+            this.createWebSocket('markPrice', wsUrl, (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.s === this.symbol.toUpperCase()) {
+                        const newPrice = parseFloat(data.p);
+                        
+                        markPriceFutures = newPrice;
+                        lastPriceUpdate = Date.now();
+                        
+                        updateMarketSpread();
+                    }
+                } catch (err) {
+                    console.error('Error en mark price:', err);
+                }
+            });
+        }
+
+        // DEPTH
+        connectDepth() {
+            const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@depth@100ms`;
+            this.createWebSocket('depth', wsUrl, (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    const now = Date.now();
+
+                    // ASKS
+                    if (data.a && Array.isArray(data.a) && data.a.length > 0) {
+                        futuresAsksData = updateOrders(futuresAsksData, data.a, now, true);
+                        asksProcessed += data.a.length;
+
+                        data.a.forEach(([p, q]) => {
+                            const price = parseFloat(p);
+                            const quantity = parseFloat(q);
+                            const usdtValue = price * quantity;
+
+                            procesarLiquidez(price, quantity, true);
+                            recordGlassmapLiquidity(price, usdtValue);
+
+                            if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
+                                showOrderAlert('ask', usdtValue, true);
+                            } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
+                                showOrderAlert('ask', usdtValue, false);
+                            }
+                        });
+                    }
+
+                    // BIDS
+                    if (data.b && Array.isArray(data.b) && data.b.length > 0) {
+                        futuresBidsData = updateOrders(futuresBidsData, data.b, now, false);
+                        bidsProcessed += data.b.length;
+
+                        data.b.forEach(([p, q]) => {
+                            const price = parseFloat(p);
+                            const quantity = parseFloat(q);
+                            const usdtValue = price * quantity;
+
+                            procesarLiquidez(price, quantity, false);
+                            recordGlassmapLiquidity(price, usdtValue);
+
+                            if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
+                                showOrderAlert('bid', usdtValue, true);
+                            } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
+                                showOrderAlert('bid', usdtValue, false);
+                            }
+                        });
+                    }
+
+                    updateProcessedCounters();
+                    updateLiquidityStats();
+                    updateOrderBookImbalance();
+                    eliminarZonasTocadas(markPriceFutures);
+                    dibujarZonasSMC();
+
+                } catch (err) {
+                    console.error('Error en depth:', err);
+                }
+            });
+        }
+
+        // KLINE
+        connectKline(interval = '1h') {
+            const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
+            const cleanInterval = validIntervals.includes(interval) ? interval : '1h';
+            
+            const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@kline_${cleanInterval}`;
+            
+            this.createWebSocket('kline', wsUrl, (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    const kline = data.k;
+                    
+                    const newCandle = {
+                        time: Math.floor(kline.t / 1000),
+                        open: parseFloat(kline.o),
+                        high: parseFloat(kline.h),
+                        low: parseFloat(kline.l),
+                        close: parseFloat(kline.c)
+                    };
+                    
+                    if (kline.x) {
+                        if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+                            candlesData[candlesData.length - 1] = newCandle;
+                        } else {
+                            candlesData.push(newCandle);
+                            if (candlesData.length > 1000) candlesData.shift();
+                        }
+                        lastCandle = newCandle;
+                    } else {
+                        if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
+                            candlesData[candlesData.length - 1] = newCandle;
+                        } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
+                            candlesData.push(newCandle);
+                            if (candlesData.length > 1000) candlesData.shift();
+                        }
+                    }
+                    
+                    if (candlestickSeries) {
+                        candlestickSeries.setData(candlesData);
+                        
+                        const ema100 = calculateEMA(candlesData, 100);
+                        if (emaSeries) {
+                            emaSeries.setData(ema100);
+                        }
+                    }
+                    
+                } catch (err) {
+                    console.error('Error en kline:', err);
+                }
+            }, true); // kline necesita reconexión especial
+        }
+
+        // CREAR WEBSOCKET CON RECONEXIÓN
+        createWebSocket(type, url, onMessageHandler, isKline = false) {
+            // Cerrar anterior si existe
+            const oldWs = this.wsInstances.get(type);
+            if (oldWs) oldWs.close();
+
+            const ws = new WebSocket(url);
+            let reconnectAttempt = 0;
+
+            ws.onopen = () => {
+                console.log(`✅ ${type} conectado`);
+                reconnectAttempt = 0;
+                updateWsStatus(`${type}: Conectado`);
+                
+                if (type === 'kline') {
+                    loadHistoricalKlines();
+                }
+            };
+
+            ws.onmessage = onMessageHandler;
+
+            ws.onerror = (error) => {
+                console.error(`❌ ${type} error:`, error);
+            };
+
+            ws.onclose = (event) => {
+                console.log(`🔌 ${type} cerrado`);
+                
+                // Reconectar automáticamente
+                setTimeout(() => {
+                    if (reconnectAttempt < 5) {
+                        reconnectAttempt++;
+                        console.log(`🔄 Reintentando ${type}...`);
+                        this.createWebSocket(type, url, onMessageHandler, isKline);
+                    }
+                }, 3000);
+            };
+
+            // Guardar referencia
+            this.wsInstances.set(type, ws);
+        }
+
+        // DESCONECTAR TODO
+        disconnectAll() {
+            this.wsInstances.forEach(ws => {
+                if (ws.readyState !== WebSocket.CLOSED) {
+                    ws.close();
+                }
+            });
+            this.wsInstances.clear();
+        }
+    }
+
+    // Variable global del manager
+    let wsManager = null;
+
+    // =====================================================
+    // 🔧 FUNCIONES NECESARIAS PARA EL MANAGER
+    // =====================================================
+
+    // 1. Reemplazar initializeWebSockets
+    function initializeWebSockets() {
+        if (wsManager) {
+            wsManager.disconnectAll();
+        }
+        
+        wsManager = new BinanceWebSocketManager(symbol);
+        wsManager.connectAll(currentInterval);
+        initializeChart();
+    }
+
+    function changeChartInterval() {
+        const newInterval = document.getElementById("interval-select").value;
+        if (newInterval === currentInterval) return;
+        
+        // Cambiar intervalo
+        currentInterval = newInterval;
+        localStorage.setItem('chartInterval', currentInterval);
+        
+        // Vaciar gráfico inmediatamente
+        candlesData = [];
+        if (candlestickSeries) candlestickSeries.setData([]);
+        if (emaSeries) emaSeries.setData([]);
+        
+        // Cambiar WebSocket (CORREGIDO - sin initializeKlineSocket)
+        if (wsManager) {
+            wsManager.connectKline(currentInterval);
+        }
+        
+        // Cargar histórico sin bloquear
+        setTimeout(() => {
+            loadHistoricalKlines().then(() => {
+                // Sin mensajes
+            }).catch(() => {
+                // Error silencioso
+            });
+        }, 50);
+    }
+
+    // 3. Botón de reconexión
+    function addReconnectButton() {
+        const headerCenter = document.querySelector('.header-center');
+        if (headerCenter && !document.getElementById('reconnect-btn')) {
+            const btn = document.createElement('button');
+            btn.id = 'reconnect-btn';
+            btn.innerHTML = '🔄';
+            btn.title = 'Reconectar WebSockets';
+            btn.style.cssText = `
+                margin-left: 10px;
+                padding: 2px 6px;
+                font-size: 10px;
+                cursor: pointer;
+                background: #444;
+                border: 1px solid #666;
+                color: white;
+                border-radius: 3px;
+            `;
+            btn.onclick = () => {
+                if (wsManager) {
+                    showError("Reconectando...");
+                    wsManager.disconnectAll();
+                    setTimeout(() => {
+                        wsManager.connectAll(currentInterval);
+                        clearError();
+                    }, 1000);
+                }
+            };
+            headerCenter.appendChild(btn);
+        }
     }
 
     function glassColor(v) {
@@ -1668,57 +2008,9 @@
       const savedPrices = JSON.parse(localStorage.getItem(`selectedPrices_${symbol}`) || '[]');
       selectedPrices.clear();
       savedPrices.forEach(price => selectedPrices.set(price, { series: null, isAsk: false }));
-    }
-    
-    // Inicializar WebSockets con manejo de reconexión
-    function initializeWebSockets() {
-      initializeTickerSocket();
-      initializeMarkPriceSocket();
-      initializeDepthSocket();
-      initializeChart();
-      initializeKlineSocket();
-    }    
+    }   
+  
  
-    // WebSocket para ticker (precio actual)
-    function initializeTickerSocket() {
-        const socket = new WebSocket(tickerWsUrl);
-
-        socket.onopen = () => {
-            updateWsStatus(`WebSocket: Conectado (Ticker)`);
-        };
-
-        socket.onerror = (error) => {
-            showError(`Error en Ticker WebSocket: ${error.message || 'Desconocido'}`);
-        };
-
-        socket.onclose = () => {
-            updateWsStatus("WebSocket: Reconectando (Ticker)...");
-            setTimeout(initializeTickerSocket, 3000);
-        };
-
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                const now = Date.now();
-
-                if (data.c !== undefined) {
-                    let newPrice = Number(data.c);   // 🔒 FORZAR número
-                    const cambio24h = data.P ? Number(data.P) : 0;
-
-                    markPriceFutures = newPrice;
-                    lastPriceUpdate = now;
-
-                    updateHeaderPrice(newPrice, cambio24h);
-
-                    updateTimestamp();
-                    scheduleTableUpdate();
-                    updateMarketSpread();
-                }
-            } catch (err) {
-                showError(`Error al procesar mensaje de Ticker: ${err.message}`);
-            }
-        };
-    }
 
     function updateHeaderPrice(price, change24h) {
         const priceEl = document.getElementById('hdr-price');
@@ -1761,305 +2053,7 @@
 
   
 
-    // WebSocket para mark price
-    function initializeMarkPriceSocket() {
-        const socket = new WebSocket(futuresMarkPriceWsUrl);
-        
-        socket.onopen = () => {
-            updateWsStatus(`WebSocket: Conectado (Mark Price)`);
-        };
-        
-        socket.onerror = (error) => {
-            showError(`Error en Mark Price WebSocket: ${error.message || 'Desconocido'}`);
-        };
-        
-        socket.onclose = () => {
-            updateWsStatus("WebSocket: Reconectando (Mark Price)...");
-            setTimeout(initializeMarkPriceSocket, 3000);
-        };
-        
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.s === symbol.toUpperCase()) {
-                    const newPrice = parseFloat(data.p);
-                    
-                    // ✅ CALCULAR CAMBIO REAL vs precio anterior
-                    const realTimeChange = calculateRealTimeChange(newPrice);
-                    
-                    markPriceFutures = newPrice;
-                    lastPriceUpdate = Date.now();
-                    
-                    // ✅ PASAR EL CAMBIO REAL
-                    //updatePriceDisplay(newPrice, realTimeChange);
-                    
-                    updateMarketSpread();
-                }
-            } catch (err) {
-                showError(`Error al procesar mensaje de Mark Price: ${err.message}`);
-            }
-        };
-    }
-    
-    // WebSocket para depth (libro de órdenes)
-    function initializeDepthSocket() {
-        const socket = new WebSocket(futuresWsUrl);
 
-        socket.onopen = () => {
-            updateWsStatus(`WebSocket: Conectado (Depth)`);
-        };
-
-        socket.onerror = (error) => {
-            showError(`Error en Depth WebSocket: ${error.message || 'Desconocido'}`);
-        };
-
-        socket.onclose = () => {
-            updateWsStatus("WebSocket: Reconectando (Depth)...");
-            setTimeout(initializeDepthSocket, 3000);
-        };
-
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                const now = Date.now();
-
-                // =====================================================
-                // 🔶 PROCESAR ASKS
-                // =====================================================
-                if (data.a && Array.isArray(data.a) && data.a.length > 0) {
-
-                    futuresAsksData = updateOrders(futuresAsksData, data.a, now, true);
-                    asksProcessed += data.a.length;
-
-                    data.a.forEach(([p, q]) => {
-                        const price = parseFloat(p);
-                        const quantity = parseFloat(q);
-                        const usdtValue = price * quantity;
-
-                        // ➕ Añadir zona SMC
-                        procesarLiquidez(price, quantity, true);
-
-                        // ➕ Registrar densidad Glassmap
-                        recordGlassmapLiquidity(price, usdtValue);
-
-                        // 🔔 Alertas institucionales
-                        if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
-                            showOrderAlert('ask', usdtValue, true);
-                        } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
-                            showOrderAlert('ask', usdtValue, false);
-                        }
-                    });
-                }
-
-                // =====================================================
-                // 🔷 PROCESAR BIDS
-                // =====================================================
-                if (data.b && Array.isArray(data.b) && data.b.length > 0) {
-
-                    futuresBidsData = updateOrders(futuresBidsData, data.b, now, false);
-                    bidsProcessed += data.b.length;
-
-                    data.b.forEach(([p, q]) => {
-                        const price = parseFloat(p);
-                        const quantity = parseFloat(q);
-                        const usdtValue = price * quantity;
-
-                        // ➕ Añadir zona SMC
-                        procesarLiquidez(price, quantity, false);
-
-                        // ➕ Registrar densidad Glassmap
-                        recordGlassmapLiquidity(price, usdtValue);
-
-                        // 🔔 Alertas institucionales
-                        if (usdtValue >= VERY_LARGE_ORDER_THRESHOLD) {
-                            showOrderAlert('bid', usdtValue, true);
-                        } else if (usdtValue >= LARGE_ORDER_THRESHOLD) {
-                            showOrderAlert('bid', usdtValue, false);
-                        }
-                    });
-                }
-
-                // =====================================================
-                // 🔄 ACTUALIZACIONES GLOBALES
-                // =====================================================
-                updateProcessedCounters();
-                updateLiquidityStats();
-                updateOrderBookImbalance();
-
-                
-
-                // 🧹 Borra zonas suaves y medias si el precio toca
-                eliminarZonasTocadas(markPriceFutures);
-
-                // 🎨 Re-dibujar zonas SMC encima del gráfico
-                dibujarZonasSMC();
-
-            } catch (err) {
-                showError(`Error al procesar mensaje de Depth: ${err.message}`);
-            }
-        };
-    }
-
-    // WebSocket para velas en tiempo real
-    function initializeKlineSocket() {
-      // 🔍 DEBUG: Verificar símbolo e intervalo
-      console.log("🔍 DEBUG - Symbol:", symbol, "Interval:", currentInterval);
-      
-      // Cerrar conexión anterior si existe
-      if (klineSocket) {
-        klineSocket.close();
-      }
-      
-      // 🔥 CONVERTIR INTERVALO A MINÚSCULA
-      const interval = currentInterval.toLowerCase();
-      
-      // 🔥 LISTA DE INTERVALOS VÁLIDOS PARA FUTUROS BINANCE
-      const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
-      
-      // 🔥 VALIDAR INTERVALO - Si no es válido, usar 1h por defecto
-      if (!validIntervals.includes(interval)) {
-        console.warn(`⚠️ Intervalo "${currentInterval}" no válido. Usando "1h" por defecto.`);
-        currentInterval = '1h';
-      } else {
-        currentInterval = interval;
-      }
-      
-      // 🔥 CONSTRUIR URL CORRECTA
-      const wsUrl = `wss://fstream.binance.com/ws/${symbol.toLowerCase()}@kline_${currentInterval}`;
-      console.log("🔗 Conectando a WebSocket:", wsUrl);
-      
-      // CREAR WEBSOCKET
-      klineSocket = new WebSocket(wsUrl);
-      
-      // ============================================
-      // 🔔 EVENTO: CONEXIÓN ABIERTA
-      // ============================================
-      klineSocket.onopen = () => {
-        console.log("✅ WebSocket Kline conectado exitosamente");
-        updateWsStatus(`WebSocket: Conectado (Kline)`);
-        reconnectAttempts = 0; // Resetear contador de reconexiones
-        loadHistoricalKlines(); // Cargar datos históricos
-      };
-      
-      // ============================================
-      // 🔔 EVENTO: ERROR DE CONEXIÓN
-      // ============================================
-      klineSocket.onerror = (error) => {
-        console.error("❌ Error en WebSocket Kline:", error);
-        
-        // 🔥 SOLO MOSTRAR PRIMER ERROR (evitar spam)
-        if (reconnectAttempts === 0) {
-          showError(`Error en Kline WebSocket: ${error.message || 'Desconocido'}`);
-        }
-        
-        // 🔥 INTENTAR RECONEXIÓN CON BACKOFF EXPONENCIAL
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-          console.log(`🔄 Reintentando conexión en ${delay}ms... (Intento ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
-          
-          setTimeout(() => {
-            initializeKlineSocket();
-          }, delay);
-          
-          reconnectAttempts++;
-        } else {
-          // 🔥 MÁXIMO DE RECONEXIONES ALCANZADO
-          if (reconnectAttempts === MAX_RECONNECT_ATTEMPTS) {
-            showError("⚠️ No se pudo conectar al WebSocket de velas. El gráfico no se actualizará en vivo, pero los datos históricos estarán disponibles.");
-            console.warn("Máximo de reconexiones alcanzado. WebSocket Kline desactivado.");
-          }
-        }
-      };
-      
-      // ============================================
-      // 🔔 EVENTO: CONEXIÓN CERRADA
-      // ============================================
-      klineSocket.onclose = () => {
-        console.log("🔌 WebSocket Kline cerrado");
-        
-        // 🔥 INTENTAR RECONEXIÓN AUTOMÁTICA
-        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          updateWsStatus("WebSocket: Reconectando (Kline)...");
-          setTimeout(() => {
-            initializeKlineSocket();
-          }, 3000);
-          reconnectAttempts++;
-        }
-      };
-      
-      // ============================================
-      // 🔔 EVENTO: MENSAJE RECIBIDO (VELAS EN VIVO)
-      // ============================================
-      klineSocket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          const kline = data.k;
-          
-          // 🔥 CREAR NUEVA VELA
-          const newCandle = {
-            time: Math.floor(kline.t / 1000), // Convertir a segundos
-            open: parseFloat(kline.o),
-            high: parseFloat(kline.h),
-            low: parseFloat(kline.l),
-            close: parseFloat(kline.c)
-          };
-          
-          // 🔥 MANEJO DE VELAS CERRADAS
-          if (kline.x) { // Vela cerrada
-            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
-              // Actualizar vela existente
-              candlesData[candlesData.length - 1] = newCandle;
-            } else {
-              // Añadir nueva vela
-              candlesData.push(newCandle);
-              
-              // 🔥 LIMITAR A 1000 VELAS EN MEMORIA
-              if (candlesData.length > 1000) {
-                candlesData.shift(); // Eliminar la más antigua
-              }
-            }
-            lastCandle = newCandle;
-          } 
-          // 🔥 MANEJO DE VELAS EN PROGRESO
-          else { 
-            if (candlesData.length > 0 && candlesData[candlesData.length - 1].time === newCandle.time) {
-              // Actualizar vela en progreso existente
-              candlesData[candlesData.length - 1] = newCandle;
-            } else if (candlesData.length === 0 || newCandle.time > candlesData[candlesData.length - 1].time) {
-              // Añadir nueva vela en progreso
-              candlesData.push(newCandle);
-              
-              // 🔥 LIMITAR A 1000 VELAS EN MEMORIA
-              if (candlesData.length > 1000) {
-                candlesData.shift();
-              }
-            }
-          }
-          
-          // 🔥 ACTUALIZAR GRÁFICO SI EXISTE
-          if (candlestickSeries) {
-            // Actualizar velas (sin auto-scroll)
-            candlestickSeries.setData(candlesData);
-            
-            // 🔥 CALCULAR EMA CON LAS 1000 VELAS
-            const ema100 = calculateEMA(candlesData, 100);
-            if (emaSeries) {
-              emaSeries.setData(ema100);
-            }
-            
-            // ⚠️ NO HACER AUTO-SCROLL - EL GRÁFICO MANTIENE SU POSICIÓN
-            // ❌ NO: chart.timeScale().scrollToPosition(0, false);
-            // ❌ NO: chart.timeScale().scrollToRealTime();
-            // ❌ NO: chart.timeScale().fitContent();
-          }
-          
-        } catch (err) {
-          console.error("❌ Error procesando vela en vivo:", err);
-          showError(`Error al procesar mensaje de Kline: ${err.message}`);
-        }
-      };
-    }
-    
     
     // Mostrar alerta visual para órdenes institucionales
     function showOrderAlert(type, value, isVeryLarge) {
@@ -2339,7 +2333,7 @@
         scheduleTableUpdate();
         
         // ✅ AÑADE ESTA LÍNEA AL FINAL DE LA FUNCIÓN:
-        updateSymbolInfoDisplay(markPriceFutures || 0, 0, totalPrices);
+        //updateSymbolInfoDisplay(markPriceFutures || 0, 0, totalPrices);
     }
     
     // Actualizar estadísticas de liquidez
@@ -3086,60 +3080,372 @@
     }
     
     function togglePriceSelection(price, isAsk, checkbox) {
-      startInteraction();
-  
-      if (checkbox.checked) {
-        if (!selectedPrices.has(price)) {
-          drawSelectedPriceLine(price, isAsk);
-          if (isAsk) {
-            asksPriceMap.set(price, true);
-          } else {
-            bidsPriceMap.set(price, true);
-          }
+        startInteraction();
+
+        if (checkbox.checked) {
+            if (!selectedPrices.has(price)) {
+                drawSelectedPriceLine(price, isAsk);
+                
+                // 🔥 NUEVO: Registrar zona para backtesting
+                const zoneData = analyzeZoneForBacktest(price, isAsk);
+                registerZoneForBacktesting(zoneData);
+                
+                if (isAsk) {
+                    asksPriceMap.set(price, true);
+                } else {
+                    bidsPriceMap.set(price, true);
+                }
+            }
+        } else {
+            if (selectedPrices.has(price)) {
+                removeSelectedPriceLine(price);
+                asksPriceMap.delete(price);
+                bidsPriceMap.delete(price);
+                
+                // 🔥 NUEVO: Eliminar del backtesting
+                removeZoneFromBacktesting(price);
+            }
         }
-      } else {
-        if (selectedPrices.has(price)) {
-          removeSelectedPriceLine(price);
-          asksPriceMap.delete(price);
-          bidsPriceMap.delete(price);
-        }
-      }
-  
-      updateTables();
-      setTimeout(endInteraction, 300);
+
+        updateTables();
+        setTimeout(endInteraction, 300);
     }
-    
+
+        // =====================================================
+    // 🔍 FUNCIONES BÁSICAS DE BACKTESTING
+    // =====================================================
+
+    function analyzeZoneForBacktest(price, isAsk) {
+        const now = Date.now();
+        const totalOrders = asksProcessed + bidsProcessed;
+        
+        return {
+            id: `zone_${price}_${now}`,
+            price: price,
+            type: isAsk ? 'resistance' : 'support',
+            timestamp: now,
+            initialData: {
+                markPrice: markPriceFutures,
+                distanceFromMark: markPriceFutures ? 
+                    Math.abs((price - markPriceFutures) / markPriceFutures * 100).toFixed(3) : 0,
+                ordersProcessed: totalOrders,
+                liquidity: getLiquidityAtPrice(price, isAsk),
+                bidAskRatio: calculateBidAskRatioAtPrice(price)
+            },
+            hits: [],
+            rebounds: [],
+            statistics: {
+                totalHits: 0,
+                successfulRebounds: 0,
+                avgOrdersBeforeHit: 0,
+                successRate: 0,
+                confidenceScore: 0
+            }
+        };
+    }
+
+    function getLiquidityAtPrice(price, isAsk) {
+        const data = isAsk ? futuresAsksData : futuresBidsData;
+        const order = data.find(o => Math.abs(o.price - price) < 0.0001);
+        return order ? order.usdt : 0;
+    }
+
+    function calculateBidAskRatioAtPrice(price) {
+        const bidOrder = futuresBidsData.find(o => Math.abs(o.price - price) < 0.0001);
+        const askOrder = futuresAsksData.find(o => Math.abs(o.price - price) < 0.0001);
+        
+        if (!bidOrder || !askOrder) return 1;
+        return bidOrder.usdt / askOrder.usdt;
+    }
+
+    function registerZoneForBacktesting(zoneData) {
+        const priceKey = zoneData.price.toFixed(2);
+        
+        if (!zoneBacktestData.zones[priceKey]) {
+            zoneBacktestData.zones[priceKey] = {
+                history: [],
+                current: zoneData,
+                dailyStats: {}
+            };
+            currentSessionStats.totalZones++;
+        }
+        
+        zoneBacktestData.zones[priceKey].current = zoneData;
+        zoneBacktestData.zones[priceKey].history.push({
+            timestamp: Date.now(),
+            action: 'registered',
+            data: zoneData.initialData
+        });
+        
+        // Limitar historial
+        if (zoneBacktestData.zones[priceKey].history.length > 50) {
+            zoneBacktestData.zones[priceKey].history.shift();
+        }
+        
+        localStorage.setItem(`zoneBacktest_${symbol}`, JSON.stringify(zoneBacktestData));
+        
+        // Dibujar zona en gráfico
+        drawZoneWithBacktestInfo(zoneData);
+        
+        // Mostrar confirmación
+        showAlert(`📊 Zona ${priceKey} registrada para análisis`, 'volume');
+    }
+
+    function removeZoneFromBacktesting(price) {
+        const priceKey = price.toFixed(2);
+        if (zoneBacktestData.zones[priceKey]) {
+            delete zoneBacktestData.zones[priceKey];
+            localStorage.setItem(`zoneBacktest_${symbol}`, JSON.stringify(zoneBacktestData));
+            currentSessionStats.totalZones = Object.keys(zoneBacktestData.zones).length;
+        }
+    }
+
+    function drawZoneWithBacktestInfo(zoneData) {
+        if (!candlestickSeries) return;
+        
+        const markers = candlestickSeries.markers() || [];
+        const price = zoneData.price;
+        
+        const marker = {
+            time: Math.floor(Date.now() / 1000),
+            position: zoneData.type === 'support' ? 'belowBar' : 'aboveBar',
+            color: zoneData.type === 'support' ? '#00FF00' : '#FF0000',
+            shape: zoneData.type === 'support' ? 'arrowUp' : 'arrowDown',
+            text: `${zoneData.type === 'support' ? 'S' : 'R'}@${formatPrice(price)}`,
+            size: 1
+        };
+        
+        markers.push(marker);
+        
+        // Mantener máximo 30 marcadores
+        if (markers.length > 30) {
+            markers.splice(0, markers.length - 30);
+        }
+        
+        candlestickSeries.setMarkers(markers);
+    }
+
+    // =====================================================
+    // 🔄 MONITOREO SIMPLE DE ZONAS
+    // =====================================================
+
+    function monitorZoneHits() {
+        if (!markPriceFutures || Object.keys(zoneBacktestData.zones).length === 0) return;
+        
+        const currentPrice = markPriceFutures;
+        const now = Date.now();
+        const totalOrders = asksProcessed + bidsProcessed;
+        
+        Object.keys(zoneBacktestData.zones).forEach(priceKey => {
+            const zone = zoneBacktestData.zones[priceKey];
+            const zonePrice = parseFloat(priceKey);
+            
+            // Calcular distancia al precio actual
+            const distance = Math.abs(currentPrice - zonePrice) / zonePrice * 100;
+            
+            // Verificar hit (0.2% de tolerancia)
+            if (distance < 0.2) {
+                registerZoneHit(zonePrice, now, totalOrders);
+            }
+        });
+    }
+
+    function registerZoneHit(price, timestamp, ordersAtHit) {
+        const priceKey = price.toFixed(2);
+        
+        if (!zoneBacktestData.zones[priceKey]) return;
+        
+        const zone = zoneBacktestData.zones[priceKey];
+        
+        // Incrementar contadores
+        zone.current.statistics.totalHits++;
+        currentSessionStats.zonesHit++;
+        
+        // Registrar datos del hit
+        const hitData = {
+            timestamp: timestamp,
+            ordersAtHit: ordersAtHit,
+            totalOrdersSinceRegistration: ordersAtHit - zone.current.initialData.ordersProcessed,
+            markPrice: markPriceFutures
+        };
+        
+        zone.current.hits.push(hitData);
+        
+        // Mantener solo últimos 20 hits
+        if (zone.current.hits.length > 20) {
+            zone.current.hits.shift();
+        }
+        
+        // Calcular estadísticas
+        updateZoneStatistics(priceKey);
+        
+        // Mostrar notificación
+        if (zone.current.statistics.totalHits <= 3) {
+            showAlert(`🎯 ${zone.current.type === 'support' ? 'Soporte' : 'Resistencia'} ${priceKey} tocada!`, 'volume');
+        }
+    }
+
+    function updateZoneStatistics(priceKey) {
+        const zone = zoneBacktestData.zones[priceKey];
+        if (!zone || zone.current.hits.length === 0) return;
+        
+        const stats = zone.current.statistics;
+        const hits = zone.current.hits;
+        
+        // Calcular órdenes promedio antes del hit
+        if (hits.length > 0) {
+            const totalOrders = hits.reduce((sum, hit) => sum + hit.totalOrdersSinceRegistration, 0);
+            stats.avgOrdersBeforeHit = Math.round(totalOrders / hits.length);
+        }
+        
+        // Calcular puntaje de confianza simple
+        stats.confidenceScore = Math.min(stats.totalHits * 10, 100);
+        
+        localStorage.setItem(`zoneBacktest_${symbol}`, JSON.stringify(zoneBacktestData));
+    }
+
+        // =====================================================
+    // 📱 PANEL DE BACKTESTING EN TIEMPO REAL
+    // =====================================================
+
+    function updateBacktestDisplay() {
+        // Crear o actualizar panel
+        let backtestPanel = document.getElementById('backtest-panel');
+        
+        if (!backtestPanel) {
+            backtestPanel = document.createElement('div');
+            backtestPanel.id = 'backtest-panel';
+            backtestPanel.style.cssText = `
+                background-color: #151515;
+                border: 1px solid #333;
+                padding: 12px;
+                margin: 10px 0;
+                border-radius: 3px;
+                font-size: 11px;
+            `;
+            
+            // Insertar después del contenedor de estadísticas
+            const statsContainer = document.querySelector('.market-stats-container');
+            if (statsContainer && statsContainer.parentNode) {
+                statsContainer.parentNode.insertBefore(backtestPanel, statsContainer.nextSibling);
+            }
+        }
+        
+        // Calcular estadísticas
+        const totalZones = Object.keys(zoneBacktestData.zones).length;
+        const zonesWithHits = Object.values(zoneBacktestData.zones)
+            .filter(z => z.current.statistics.totalHits > 0).length;
+        
+        // Calcular promedio de órdenes antes del hit
+        const zonesWithData = Object.values(zoneBacktestData.zones)
+            .filter(z => z.current.statistics.avgOrdersBeforeHit > 0);
+        
+        const avgOrdersBeforeHit = zonesWithData.length > 0
+            ? Math.round(zonesWithData.reduce((sum, z) => sum + z.current.statistics.avgOrdersBeforeHit, 0) / zonesWithData.length)
+            : 0;
+        
+        // Calcular éxito total
+        const totalHits = currentSessionStats.zonesHit;
+        const totalRebounds = currentSessionStats.successfulRebounds + currentSessionStats.failedRebounds;
+        const successRate = totalRebounds > 0 
+            ? Math.round((currentSessionStats.successfulRebounds / totalRebounds) * 100)
+            : 0;
+        
+        // Obtener zonas más activas (con más hits)
+        const activeZones = Object.entries(zoneBacktestData.zones)
+            .map(([price, data]) => ({
+                price: parseFloat(price),
+                stats: data.current.statistics,
+                type: data.current.type,
+                hits: data.current.statistics.totalHits
+            }))
+            .filter(z => z.hits > 0)
+            .sort((a, b) => b.hits - a.hits)
+            .slice(0, 3);
+        
+        backtestPanel.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <h3 style="color: #9c27b0; margin: 0; font-size: 12px;">🧠 BACKTESTING DE ZONAS</h3>
+                <div style="display: flex; gap: 8px; font-size: 10px;">
+                    <span style="color: ${totalHits > 0 ? '#00ff88' : '#888'}">🎯 ${totalHits}</span>
+                    <span style="color: ${currentSessionStats.successfulRebounds > 0 ? '#00ff88' : '#888'}">✅ ${currentSessionStats.successfulRebounds}</span>
+                    <span style="color: ${currentSessionStats.failedRebounds > 0 ? '#ff5555' : '#888'}">❌ ${currentSessionStats.failedRebounds}</span>
+                </div>
+            </div>
+            
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+                <div style="text-align: center; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 3px;">
+                    <div style="font-size: 9px; color: #888;">Zonas</div>
+                    <div style="font-size: 14px; font-weight: bold;">${zonesWithHits}/${totalZones}</div>
+                </div>
+                
+                <div style="text-align: center; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 3px;">
+                    <div style="font-size: 9px; color: #888;">Órdenes/hit</div>
+                    <div style="font-size: 14px; font-weight: bold;">${avgOrdersBeforeHit > 0 ? avgOrdersBeforeHit.toLocaleString() : '--'}</div>
+                </div>
+                
+                <div style="text-align: center; background: rgba(0,0,0,0.3); padding: 6px; border-radius: 3px;">
+                    <div style="font-size: 9px; color: #888;">Éxito</div>
+                    <div style="font-size: 14px; font-weight: bold; color: ${successRate >= 70 ? '#00ff88' : successRate >= 50 ? '#ffaa00' : '#ff5555'}">
+                        ${successRate}%
+                    </div>
+                </div>
+            </div>
+            
+            ${activeZones.length > 0 ? `
+            <div style="margin-bottom: 10px;">
+                <div style="font-size: 10px; color: #888; margin-bottom: 5px;">🏆 Zonas Más Activas:</div>
+                <div style="font-size: 9px;">
+                    ${activeZones.map(zone => `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 0; border-bottom: 1px solid #2a2a2a;">
+                            <div style="display: flex; align-items: center; gap: 5px;">
+                                <span style="color: ${zone.type === 'support' ? '#00ff88' : '#ff5555'}">${zone.type === 'support' ? '🟢' : '🔴'}</span>
+                                <span>${formatPrice(zone.price)}</span>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="font-size: 10px; color: #888;">${zone.hits} hits</div>
+                                <div style="font-size: 9px; color: ${zone.stats.confidenceScore >= 80 ? '#00ff88' : zone.stats.confidenceScore >= 60 ? '#ffaa00' : '#ff5555'}">
+                                    C:${zone.stats.confidenceScore}%
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+            ` : totalZones > 0 ? `
+            <div style="text-align: center; padding: 10px; color: #888; font-size: 10px;">
+                ⏳ Esperando que el precio toque las zonas seleccionadas...
+            </div>
+            ` : `
+            <div style="text-align: center; padding: 10px; color: #888; font-size: 10px;">
+                📌 Selecciona zonas en las tablas para comenzar el análisis
+            </div>
+            `}
+            
+            <div style="display: flex; justify-content: space-between; font-size: 9px; color: #888; border-top: 1px solid #333; padding-top: 8px;">
+                <div>
+                    <div>📊 Total órdenes: ${(asksProcessed + bidsProcessed).toLocaleString()}</div>
+                    <div>⏱️ Sesión: ${formatSessionDuration(currentSessionStats.startTime)}</div>
+                </div>
+                <div style="text-align: right;">
+                    <div>${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                    <div>${symbol}</div>
+                </div>
+            </div>
+        `;
+    }
+
+    function formatSessionDuration(startTime) {
+        const seconds = Math.floor((Date.now() - startTime) / 1000);
+        if (seconds < 60) return `${seconds}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+    }
+
+        
     function saveSelectedPrices() {
       const prices = Array.from(selectedPrices.keys());
       localStorage.setItem(`selectedPrices_${symbol}`, JSON.stringify(prices));
-    }
-    
-    // Cambiar intervalo del gráfico
-    function changeChartInterval() {
-      const newInterval = document.getElementById("interval-select").value;
-      if (newInterval === currentInterval) return;
-      
-      currentInterval = newInterval;
-      localStorage.setItem('chartInterval', currentInterval);
-      
-      showError("Cambiando intervalo de velas...");
-      candlesData = [];
-      
-      if (candlestickSeries) {
-        candlestickSeries.setData([]);
-      }
-      
-      if (emaSeries) {
-        emaSeries.setData([]);
-      }
-      
-      initializeKlineSocket();
-      loadHistoricalKlines().then(() => {
-        clearError();
-      }).catch((err) => {
-        showError(`Error al cambiar intervalo: ${err.message}`);
-        setTimeout(clearError, 5000);
-      });
     }
     
     // Cargar pares de criptomonedas
@@ -3533,14 +3839,24 @@
     // ===============================
     function init() {
         // Inicializar el display de precio con valores por defecto
-              
+                      
         loadSelectedPrices();
         setupEventListeners();
         initializeWebSockets();
         setInterval(updateTimestamp, 1000);
         loadCryptoPairs();
         initAlerts();
-        setupFullscreenButton();  // ← ⭐ ACTIVAR FULLSCREEN
+        setupFullscreenButton();
+
+        // ✅ AÑADE ESTA LÍNEA:
+        addReconnectButton();
+
+        // 🔥 AGREGAR ESTAS 4 LÍNEAS PARA BACKTESTING:
+        // Inicializar backtesting
+        currentSessionStats.ordersAtStart = asksProcessed + bidsProcessed;
+        setInterval(monitorZoneHits, 3000); // Monitorear cada 3 segundos
+        setInterval(updateBacktestDisplay, 5000); // Actualizar panel cada 5 segundos
+        setTimeout(() => updateBacktestDisplay(), 2000); // Mostrar panel después de 2 segundos
 
         // Exponer funciones globales
         window.toggleClusters = toggleClusters;
@@ -3552,6 +3868,13 @@
         window.toggleSoundAlerts = toggleSoundAlerts;
         window.saveKeyLevels = saveKeyLevels;
         window.copyPriceCell = copyPriceCell;
+        
+        // ✅ AÑADE ESTAS 2 LÍNEAS:
+       // window.reconnectAllWebSockets = reconnectAllWebSockets;
+        window.wsManager = wsManager;
+
+        // 🔥 AGREGAR ESTA LÍNEA PARA BACKTESTING:
+        window.updateBacktestDisplay = updateBacktestDisplay;
     }
 
     // 🚀 Iniciar la app
