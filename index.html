@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -2336,22 +2335,33 @@ let positionManager;
                 this.connectKline(interval);
             }
 
-            // TICKER - Este está bien, no lo cambies
             connectTicker() {
-                const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@bookTicker`;
+                // ✅ USAR @ticker en lugar de @bookTicker
+                const wsUrl = `wss://stream.binancefuture.com/ws/${this.symbol}@ticker`;
+                console.log(`📊 Conectando ticker: ${wsUrl}`);
+                
                 this.createWebSocket('ticker', wsUrl, (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        console.log('📊 Ticker recibido:', data.c, data.P); // Debug
+                        
                         if (data.c !== undefined) {
                             let newPrice = Number(data.c);
                             const cambio24h = data.P ? Number(data.P) : 0;
+                            
                             markPriceFutures = newPrice;
                             lastPriceUpdate = Date.now();
-                            if (smcEnabled) updateSMCCandles(newPrice);
+                            
+                            if (smcEnabled) {
+                                updateSMCCandles(newPrice);
+                            }
+                            
                             updateHeaderPrice(newPrice, cambio24h);
                             updateTimestamp();
                             scheduleTableUpdate();
                             updateMarketSpread();
+                        } else {
+                            console.warn('⚠️ Datos sin precio:', data);
                         }
                     } catch (err) {
                         console.error('Error en ticker:', err);
@@ -2359,9 +2369,9 @@ let positionManager;
                 });
             }
 
-            // MARK PRICE - CORREGIDO (añadir @1s)
             connectMarkPrice() {
-                const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@markPrice@1s`;
+                const wsUrl = `wss://stream.binancefuture.com/ws/${this.symbol}@markPrice@1s`;
+                console.log(`📊 Conectando markPrice: ${wsUrl}`);
                 this.createWebSocket('markPrice', wsUrl, (event) => {
                     try {
                         const data = JSON.parse(event.data);
@@ -2377,9 +2387,9 @@ let positionManager;
                 });
             }
 
-            // DEPTH - CORREGIDO (especificar profundidad)
             connectDepth() {
-                const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@depth20@100ms`;
+                const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@depth@100ms`;
+                console.log(`📊 Conectando depth: ${wsUrl}`);
                 this.createWebSocket('depth', wsUrl, (event) => {
                     try {
                         const data = JSON.parse(event.data);
@@ -2428,7 +2438,6 @@ let positionManager;
                 });
             }
 
-            // KLINE - Este está bien
             connectKline(interval = '1h') {
                 const validIntervals = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M'];
                 let cleanInterval = validIntervals.includes(interval) ? interval : '1h';
@@ -2443,7 +2452,7 @@ let positionManager;
                     }
                 }
                 
-                const wsUrl = `wss://fstream.binance.com/ws/${this.symbol}@kline_${cleanInterval}`;
+                const wsUrl = `wss://stream.binancefuture.com/ws/${this.symbol}@kline_${cleanInterval}`;
                 console.log(`📈 Conectando kline: ${wsUrl}`);
                 
                 this.createWebSocket('kline', wsUrl, (event) => {
@@ -2549,10 +2558,7 @@ let positionManager;
                     };
                     
                     ws.onmessage = (event) => {
-                        if (event.data === 'pong' || event.data.includes('"pong"')) {
-                            return;
-                        }
-                        
+                        if (event.data === 'pong' || event.data.includes('"pong"')) return;
                         try {
                             onMessageHandler(event);
                         } catch (err) {
@@ -2606,17 +2612,11 @@ let positionManager;
             }
             
             disconnectAll() {
-                this.pingIntervals.forEach((interval, type) => {
-                    clearInterval(interval);
-                });
+                this.pingIntervals.forEach((interval) => clearInterval(interval));
                 this.pingIntervals.clear();
-                
-                this.reconnectTimeouts.forEach((timeout, type) => {
-                    clearTimeout(timeout);
-                });
+                this.reconnectTimeouts.forEach((timeout) => clearTimeout(timeout));
                 this.reconnectTimeouts.clear();
-                
-                this.wsInstances.forEach((ws, type) => {
+                this.wsInstances.forEach((ws) => {
                     if (ws && ws.readyState !== WebSocket.CLOSED) {
                         ws.onclose = null;
                         ws.close(1000, "Desconexión manual");
@@ -2628,134 +2628,6 @@ let positionManager;
 
         // Variable global del manager
         let wsManager = null;
-
-                // ============================================
-        // FUNCIONES DE RECONEXIÓN Y MONITOREO
-        // ============================================
-        
-        function forceReconnectAll() {
-            if (wsManager) {
-                console.log("🔄 Forzando reconexión de todos los WebSockets...");
-                
-                const statusDiv = document.getElementById("ws-status");
-                if (statusDiv) {
-                    const originalText = statusDiv.innerHTML;
-                    statusDiv.innerHTML = '🔄 Reconectando... <span class="spinner"></span>';
-                }
-                
-                wsManager.disconnectAll();
-                
-                setTimeout(() => {
-                    wsManager.connectAll(currentInterval);
-                    console.log("✅ Reconexión completada");
-                    
-                    setTimeout(() => {
-                        if (typeof loadHistoricalKlines === 'function') {
-                            loadHistoricalKlines().catch(err => {
-                                console.error('Error recargando histórico:', err);
-                            });
-                        }
-                    }, 2000);
-                }, 1000);
-            } else {
-                console.error("❌ WebSocket Manager no inicializado");
-                if (typeof initializeWebSockets === 'function') {
-                    initializeWebSockets();
-                }
-            }
-        }
-
-        function addFloatingReconnectButton() {
-            if (document.getElementById('floating-reconnect-btn')) return;
-            
-            const btn = document.createElement('button');
-            btn.id = 'floating-reconnect-btn';
-            btn.innerHTML = '🔌 Reconectar WebSockets';
-            btn.style.cssText = `
-                position: fixed;
-                bottom: 20px;
-                right: 20px;
-                z-index: 10000;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                border: none;
-                border-radius: 25px;
-                padding: 10px 20px;
-                font-size: 12px;
-                font-weight: bold;
-                cursor: pointer;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-                transition: all 0.3s ease;
-                font-family: 'Consolas', monospace;
-            `;
-            
-            btn.onmouseenter = () => {
-                btn.style.transform = 'translateY(-2px)';
-                btn.style.boxShadow = '0 6px 20px rgba(102, 126, 234, 0.4)';
-            };
-            
-            btn.onmouseleave = () => {
-                btn.style.transform = 'translateY(0)';
-                btn.style.boxShadow = '0 4px 15px rgba(0,0,0,0.3)';
-            };
-            
-            btn.onclick = () => {
-                forceReconnectAll();
-                btn.innerHTML = '🔄 Reconectando...';
-                setTimeout(() => {
-                    btn.innerHTML = '🔌 Reconectar WebSockets';
-                }, 3000);
-            };
-            
-            document.body.appendChild(btn);
-            console.log('✅ Botón flotante de reconexión añadido');
-        }
-
-        function monitorWebSocketStatus() {
-            setInterval(() => {
-                if (!wsManager) return;
-                
-                const statuses = [];
-                const types = ['ticker', 'markPrice', 'depth', 'kline'];
-                
-                types.forEach(type => {
-                    const ws = wsManager.wsInstances.get(type);
-                    if (ws) {
-                        const state = ws.readyState;
-                        let stateText = '';
-                        switch(state) {
-                            case 0: stateText = '🟡 Conectando'; break;
-                            case 1: stateText = '🟢 Abierto'; break;
-                            case 2: stateText = '🟠 Cerrando'; break;
-                            case 3: stateText = '🔴 Cerrado'; break;
-                        }
-                        statuses.push(`${type}: ${stateText}`);
-                    } else {
-                        statuses.push(`${type}: ❌ No existe`);
-                    }
-                });
-                
-                const hasIssue = statuses.some(s => s.includes('Cerrado') || s.includes('No existe'));
-                if (hasIssue) {
-                    console.log('📊 Estado WebSockets:', statuses.join(' | '));
-                }
-                
-                const wsStatus = document.getElementById('ws-status');
-                if (wsStatus) {
-                    const allOpen = statuses.every(s => s.includes('Abierto'));
-                    if (allOpen) {
-                        wsStatus.innerHTML = '✅ WebSockets: Conectados';
-                        wsStatus.style.color = '#4caf50';
-                    } else {
-                        wsStatus.innerHTML = `⚠️ WebSockets: ${statuses.filter(s => !s.includes('Abierto')).length}/4 problemas`;
-                        wsStatus.style.color = '#ff9800';
-                    }
-                }
-            }, 5000);
-        }
-        
-        // Exponer funciones globalmente
-        window.forceReconnectAll = forceReconnectAll;
 
         // =====================================================
         // 🔄 FUNCIÓN DE RECONEXIÓN GLOBAL
@@ -6149,7 +6021,6 @@ let positionManager;
     // 🔧 FUNCIÓN updateSMCInfoPanel - VERSIÓN CORREGIDA (TODO EL PANEL ARRASTRABLE)
     function updateSMCInfoPanel(zones) {
         try {
-            // Buscar o crear el panel SMC
             let smcPanel = document.getElementById('smc-info-panel');
             
             if (!smcPanel) {
@@ -6157,9 +6028,9 @@ let positionManager;
                 smcPanel.id = 'smc-info-panel';
                 smcPanel.className = 'smc-panel';
                 smcPanel.style.cssText = `
-                    position: absolute !important;
-                    top: 100px;
-                    right: 20px;
+                    position: fixed !important;
+                    bottom: 20px;
+                    left: 20px;
                     background: rgba(20, 20, 20, 0.97);
                     border: 1px solid #9c27b0;
                     border-radius: 8px;
@@ -6167,19 +6038,17 @@ let positionManager;
                     color: white;
                     font-size: 11px;
                     z-index: 10000;
-                    max-width: 280px;
+                    width: 260px;
                     backdrop-filter: blur(10px);
                     font-family: 'Consolas', monospace;
                     box-shadow: 0 6px 25px rgba(0, 0, 0, 0.7);
                     cursor: move;
                     user-select: none;
                     transition: opacity 0.3s ease;
-                    overflow: visible;
-                    min-width: 250px;
-                    resize: both;
+                    overflow-y: auto;
+                    max-height: 400px;
                 `;
                 
-                // Contenedor del gráfico (donde se colocará)
                 const chartContainer = document.getElementById('chart-container');
                 if (chartContainer) {
                     chartContainer.appendChild(smcPanel);
@@ -6187,33 +6056,32 @@ let positionManager;
                     document.body.appendChild(smcPanel);
                 }
                 
-                // HACER TODO EL PANEL ARRASTRABLE
                 makeSMCPanelFullyDraggable(smcPanel);
             }
             
-            // Generar contenido
+            // Generar contenido HTML
             let html = `
-                <div style="position: relative; padding-right: 20px; cursor: move;">
+                <div style="position: relative; padding-right: 20px;">
                     <div style="color: #9c27b0; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #444; padding-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
                         <span>📊 Zonas SMC (${zones.length})</span>
-                        <div style="font-size: 12px; color: #888; padding: 2px 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.05); border: 1px solid #444;" title="Arrastrar desde cualquier parte">☰ Arrastrar</div>
+                        <div style="font-size: 12px; color: #888; padding: 2px 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.05); border: 1px solid #444;" title="Arrastrar">☰</div>
                     </div>
                 </div>
             `;
             
-            if (zones.length === 0) {
-                html += `<div style="text-align: center; padding: 20px; color: #888; font-size: 10px; cursor: default;">
+            if (!zones || zones.length === 0) {
+                html += `<div style="text-align: center; padding: 20px; color: #888; font-size: 10px;">
                             No hay zonas SMC detectadas<br>
                             <small>Esperando órdenes grandes (>5M USDT)</small>
                          </div>`;
             } else {
-                html += `<div style="max-height: 300px; overflow-y: auto; padding-right: 5px; cursor: default;">`;
-                
                 zones.forEach((zone, index) => {
                     const isBullish = zone.type === 'bullish';
-                    const score = zone.score ? zone.score.totalScore : 0;
-                    const distance = ((zone.price - markPriceFutures) / markPriceFutures * 100).toFixed(2);
-                    const distanceSign = parseFloat(distance) >= 0 ? '+' : '';
+                    const score = zone.score ? zone.score.totalScore : (zone.importanceScore || 0);
+                    const price = zone.price;
+                    const usdt = zone.usdt;
+                    const distancia = markPriceFutures ? ((price - markPriceFutures) / markPriceFutures * 100).toFixed(2) : '0.00';
+                    const distanciaSign = parseFloat(distancia) >= 0 ? '+' : '';
                     
                     html += `
                         <div style="margin: 8px 0; padding: 8px; border-radius: 4px; border-left: 3px solid ${isBullish ? '#00ff88' : '#ff5555'}; background: rgba(255, 255, 255, 0.05);">
@@ -6221,78 +6089,66 @@ let positionManager;
                                 <span style="color: ${isBullish ? '#00ff88' : '#ff5555'}; font-weight: bold; font-size: 12px;">
                                     ${isBullish ? '🟢 BULL' : '🔴 BEAR'} #${index+1}
                                 </span>
-                                <span style="font-weight: bold; font-size: 12px;">${formatPrice(zone.price)}</span>
+                                <span style="font-weight: bold; font-size: 12px;">${formatPrice(price)}</span>
                             </div>
                             <div style="font-size: 10px; color: #ccc; margin-top: 4px;">
                                 <div style="display: flex; justify-content: space-between; margin-bottom: 3px;">
                                     <span>Score: <strong style="color: #fff;">${score}</strong></span>
-                                    <span style="color: ${parseFloat(distance) >= 0 ? '#4eff78' : '#ff5555'}; font-weight: bold;">
-                                        ${distanceSign}${distance}%
+                                    <span style="color: ${parseFloat(distancia) >= 0 ? '#4eff78' : '#ff5555'}; font-weight: bold;">
+                                        ${distanciaSign}${Math.abs(distancia)}%
                                     </span>
                                 </div>
                                 <div style="display: flex; justify-content: space-between; font-size: 9px;">
-                                    <span>Volumen: ${formatUsdt(zone.usdt)}</span>
-                                    <span>Distancia: ${Math.abs(zone.price - markPriceFutures).toFixed(2)} USDT</span>
+                                    <span>Volumen: ${formatUsdt(usdt)}</span>
+                                    <span>Distancia: ${Math.abs(price - markPriceFutures).toFixed(2)} USDT</span>
                                 </div>
                             </div>
                         </div>
                     `;
                 });
-                
-                html += `</div>`;
             }
             
             html += `
-                <div style="font-size: 9px; color: #888; margin-top: 10px; text-align: center; border-top: 1px solid #333; padding-top: 8px; cursor: move; background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px;">
+                <div style="font-size: 9px; color: #888; margin-top: 10px; text-align: center; border-top: 1px solid #333; padding-top: 8px;">
                     <div>Actualizado: ${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</div>
                     <div style="margin-top: 3px; font-size: 8px; color: #666;">
-                        💡 Arrastra desde CUALQUIER parte del borde | Cierra con ×
+                        💡 Arrastra desde el borde | Cierra ×
                     </div>
                 </div>
             `;
             
-            // Botón de cerrar (con stopPropagation)
-            const closeBtn = smcPanel.querySelector('.smc-close-btn');
+            // Botón de cerrar
+            let closeBtn = smcPanel.querySelector('.smc-close-btn');
             if (!closeBtn) {
-                const newCloseBtn = document.createElement('div');
-                newCloseBtn.className = 'smc-close-btn';
-                newCloseBtn.innerHTML = '×';
-                newCloseBtn.style.cssText = `
+                closeBtn = document.createElement('div');
+                closeBtn.className = 'smc-close-btn';
+                closeBtn.innerHTML = '×';
+                closeBtn.style.cssText = `
                     position: absolute !important;
-                    top: 8px !important;
+                    top: 5px !important;
                     right: 8px !important;
                     color: #888 !important;
-                    font-size: 18px !important;
+                    font-size: 16px !important;
                     cursor: pointer !important;
-                    width: 22px !important;
-                    height: 22px !important;
+                    width: 20px !important;
+                    height: 20px !important;
                     display: flex !important;
                     align-items: center !important;
                     justify-content: center !important;
                     border-radius: 50% !important;
-                    transition: all 0.2s ease !important;
-                    z-index: 1001 !important;
                     background: rgba(0, 0, 0, 0.3) !important;
+                    z-index: 1001 !important;
                 `;
-                
-                newCloseBtn.onclick = function(e) {
-                    e.stopPropagation(); // ✅ IMPORTANTE: Evita que active el arrastre
-                    e.preventDefault();
+                closeBtn.onclick = function(e) {
+                    e.stopPropagation();
                     smcPanel.style.opacity = '0';
-                    smcPanel.style.transform = 'scale(0.95)';
                     setTimeout(() => {
                         if (smcPanel && smcPanel.parentNode) {
                             smcPanel.parentNode.removeChild(smcPanel);
                         }
                     }, 300);
                 };
-                
-                // Prevenir que el botón active el arrastre
-                newCloseBtn.addEventListener('mousedown', function(e) {
-                    e.stopPropagation();
-                });
-                
-                smcPanel.appendChild(newCloseBtn);
+                smcPanel.appendChild(closeBtn);
             }
             
             // Actualizar contenido
@@ -6300,28 +6156,12 @@ let positionManager;
             contentDiv.className = 'smc-content';
             contentDiv.innerHTML = html;
             
-            // Configurar eventos para el contenido
-            const titleDiv = contentDiv.querySelector('div[style*="cursor: move"]');
-            const footerDiv = contentDiv.querySelector('div[style*="cursor: move"]:last-child');
-            
-            if (titleDiv) {
-                titleDiv.addEventListener('mousedown', function(e) {
-                    e.stopPropagation(); // El panel maneja el arrastre
-                });
-            }
-            
-            if (footerDiv) {
-                footerDiv.addEventListener('mousedown', function(e) {
-                    e.stopPropagation(); // El panel maneja el arrastre
-                });
-            }
-            
             if (!smcPanel.querySelector('.smc-content')) {
                 smcPanel.appendChild(contentDiv);
             }
             
             smcPanel.style.opacity = '1';
-            smcPanel.style.transform = 'scale(1)';
+            smcPanel.style.display = 'block';
             
         } catch (error) {
             console.error("Error en updateSMCInfoPanel:", error);
@@ -9293,9 +9133,7 @@ let positionManager;
         initAlerts();
         setupFullscreenButton();
         addReconnectButton();
-        addFloatingReconnectButton();  // ← AGREGAR ESTA LÍNEA
-        monitorWebSocketStatus();       // ← AGREGAR ESTA LÍNEA
-
+        
         // ✅ INICIALIZAR SISTEMA DE GESTIÓN DE LÍNEAS (AÑADE ESTO)
         exposeChartLevelsManager(); // Expone el manager globalmente
         setTimeout(() => {
